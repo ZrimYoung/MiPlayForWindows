@@ -6,6 +6,7 @@ namespace MiPlay.Desktop.Services;
 
 public interface IDesktopAudioPlatform : IAudioSourceCatalog, IDisposable
 {
+    bool SupportsLocalMute => false;
     AudioSourceItem GetDefaultOutputDevice();
     event EventHandler? Suspending;
     IMediaPacingClock CreateMediaClock();

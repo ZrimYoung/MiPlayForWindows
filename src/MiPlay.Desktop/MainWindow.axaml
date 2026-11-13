@@ -1,56 +1,70 @@
 <Window xmlns="https://github.com/avaloniaui" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:local="using:MiPlay.Desktop" x:Class="MiPlay.Desktop.MainWindow" x:DataType="local:MainViewModel"
-        Title="MiPlay Desktop" Width="580" Height="720" MinWidth="500" MinHeight="620"
-        Background="#F5F7F6" Icon="/Assets/app.ico">
+        Title="MiPlay" Width="500" Height="840" MinWidth="440" MinHeight="600"
+        Background="#172633" Icon="/Assets/app.ico">
   <Window.Styles>
-    <Style Selector="TextBlock"><Setter Property="Foreground" Value="#192C29" /></Style>
-    <Style Selector="Button"><Setter Property="Padding" Value="18,10" /><Setter Property="CornerRadius" Value="8" /></Style>
-    <Style Selector="Button.primary"><Setter Property="Background" Value="#146B55" /><Setter Property="Foreground" Value="White" /></Style>
-    <Style Selector="Border.card"><Setter Property="Background" Value="White" /><Setter Property="CornerRadius" Value="16" /><Setter Property="Padding" Value="24" /></Style>
+    <Style Selector="TextBlock"><Setter Property="Foreground" Value="#F0F3F7" /></Style>
+    <Style Selector="Button"><Setter Property="Foreground" Value="#F0F3F7" /><Setter Property="Background" Value="#344958" /><Setter Property="Padding" Value="14,9" /><Setter Property="CornerRadius" Value="12" /></Style>
+    <Style Selector="Border.speaker"><Setter Property="Background" Value="#263644" /><Setter Property="CornerRadius" Value="22" /><Setter Property="Padding" Value="20" /></Style>
+    <Style Selector="Border.speaker.selected"><Setter Property="Background" Value="#E5EDF5" /></Style>
+    <Style Selector="Border.speaker.selected TextBlock"><Setter Property="Foreground" Value="#172633" /></Style>
+    <Style Selector="Border.speaker.selected Button"><Setter Property="Foreground" Value="#172633" /><Setter Property="Background" Value="#CCDCEB" /></Style>
+    <Style Selector="Slider"><Setter Property="Foreground" Value="#3482F6" /></Style>
   </Window.Styles>
-  <Grid Margin="28" RowDefinitions="Auto,*,Auto" RowSpacing="20">
-    <StackPanel Spacing="6">
-      <TextBlock Text="MiPlay" FontSize="30" FontWeight="SemiBold" />
-      <TextBlock Text="把电脑的声音，交给音箱。" FontSize="14" Foreground="#61746D" />
-    </StackPanel>
-    <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto">
-      <StackPanel Spacing="16">
-        <Border Classes="card">
-          <StackPanel Spacing="16">
-            <Grid ColumnDefinitions="*,Auto">
-              <TextBlock Text="选择音箱" FontSize="17" FontWeight="SemiBold" VerticalAlignment="Center" />
-              <Button Grid.Column="1" Content="刷新" Command="{Binding RefreshCommand}" />
-            </Grid>
-            <ComboBox ItemsSource="{Binding Speakers}" SelectedItem="{Binding SelectedSpeaker}" HorizontalAlignment="Stretch"
-                      PlaceholderText="请选择同一网络中的音箱" IsEnabled="{Binding CanSelectSpeaker}" />
-            <TextBlock Text="{Binding DiscoveryHint}" FontSize="12" Foreground="#61746D" TextWrapping="Wrap" />
-          </StackPanel>
-        </Border>
-        <Border Classes="card">
-          <StackPanel Spacing="16">
-            <TextBlock Text="系统声音" FontSize="17" FontWeight="SemiBold" />
-            <TextBlock Text="捕获默认输出设备的声音，电脑也会继续播放。" Foreground="#61746D" TextWrapping="Wrap" />
-            <Border Background="#EDF6F2" CornerRadius="8" Padding="14">
-              <TextBlock Text="{Binding StatusText}" TextWrapping="Wrap" />
-            </Border>
-            <Grid ColumnDefinitions="*,*" ColumnSpacing="12">
-              <Button Classes="primary" Content="开始投放" Command="{Binding StartCommand}" HorizontalAlignment="Stretch" HorizontalContentAlignment="Center" />
-              <Button Grid.Column="1" Content="停止" Command="{Binding StopCommand}" HorizontalAlignment="Stretch" HorizontalContentAlignment="Center" />
-            </Grid>
-            <Grid ColumnDefinitions="Auto,*,Auto" ColumnSpacing="12">
-              <TextBlock Text="音箱音量" VerticalAlignment="Center" />
-              <Slider Grid.Column="1" Minimum="0" Maximum="100" Value="{Binding Volume}" IsEnabled="{Binding IsCasting}" />
-              <TextBlock Grid.Column="2" Text="{Binding VolumeLabel}" VerticalAlignment="Center" MinWidth="28" />
-            </Grid>
-          </StackPanel>
-        </Border>
-        <TextBlock Text="{Binding ErrorText}" Foreground="#A63E35" TextWrapping="Wrap" IsVisible="{Binding HasError}" />
-      </StackPanel>
-    </ScrollViewer>
-    <Grid Grid.Row="2" ColumnDefinitions="*,Auto,Auto" ColumnSpacing="8">
-      <TextBlock Text="关闭窗口后仍可后台投放" FontSize="11" Foreground="#61746D" VerticalAlignment="Center" />
-      <Button Grid.Column="1" Content="音频权限" IsVisible="{Binding IsMac}" Command="{Binding PermissionCommand}" Padding="10,8" />
-      <Button Grid.Column="2" Content="导出诊断" Command="{Binding ExportCommand}" Padding="10,8" />
+  <Grid Margin="24" RowDefinitions="Auto,Auto,*,Auto" RowSpacing="20">
+    <Grid ColumnDefinitions="*,Auto">
+      <StackPanel Spacing="5"><TextBlock Text="声音投放" FontSize="26" FontWeight="SemiBold" /><TextBlock Text="{Binding StatusText}" Foreground="#ABBAC8" /></StackPanel>
+      <Button Grid.Column="1" Content="全部停止" Command="{Binding StopCommand}" VerticalAlignment="Center" />
     </Grid>
+    <Border Grid.Row="1" Background="#263644" CornerRadius="22" Padding="20">
+      <StackPanel Spacing="12">
+        <TextBlock Text="系统音频" FontSize="17" FontWeight="SemiBold" />
+        <TextBlock Text="音乐、视频和浏览器 · 跟随默认输出设备" Foreground="#ABBAC8" FontSize="12" />
+        <ToggleSwitch Content="仅音箱播放（实验）" OnContent="已开启" OffContent="已关闭" Foreground="#F0F3F7" IsChecked="{Binding MuteLocalOutput}" IsEnabled="{Binding SupportsLocalMute}" />
+        <TextBlock Text="{Binding LocalOutputHint}" Foreground="#ABBAC8" FontSize="11" TextWrapping="Wrap" />
+      </StackPanel>
+    </Border>
+    <Grid Grid.Row="2" RowDefinitions="Auto,*" RowSpacing="12">
+      <Grid ColumnDefinitions="*,Auto"><StackPanel Spacing="4"><TextBlock Text="播放到" FontSize="15" FontWeight="SemiBold" /><TextBlock Text="{Binding DiscoveryHint}" FontSize="11" Foreground="#ABBAC8" TextWrapping="Wrap" /></StackPanel><Button Grid.Column="1" Content="重新扫描" Command="{Binding RefreshCommand}" Padding="10,7" /></Grid>
+      <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto">
+        <StackPanel Spacing="12">
+          <TextBlock Text="发现音箱后将显示在这里。可以同时选择多台。" IsVisible="{Binding IsEmpty}" Foreground="#ABBAC8" Margin="12,24" TextWrapping="Wrap" />
+          <ItemsControl ItemsSource="{Binding Speakers}">
+            <ItemsControl.ItemsPanel><ItemsPanelTemplate><StackPanel Spacing="12" /></ItemsPanelTemplate></ItemsControl.ItemsPanel>
+            <ItemsControl.ItemTemplate><DataTemplate x:DataType="local:SpeakerViewModel">
+              <Border Classes="speaker" Classes.selected="{Binding Selected}">
+                <StackPanel Spacing="14">
+                  <Button Command="{Binding ToggleCommand}" Background="Transparent" BorderThickness="0" Padding="0" HorizontalAlignment="Stretch" HorizontalContentAlignment="Stretch">
+                    <Grid ColumnDefinitions="*,Auto" ColumnSpacing="12">
+                      <StackPanel Spacing="5"><TextBlock Text="{Binding Name}" FontSize="18" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" /><TextBlock Text="{Binding StateText}" FontSize="11" Opacity="0.7" TextWrapping="Wrap" /></StackPanel>
+                      <CheckBox Grid.Column="1" IsChecked="{Binding Selected, Mode=OneWay}" IsHitTestVisible="False" Focusable="False" VerticalAlignment="Center" />
+                    </Grid>
+                  </Button>
+                  <StackPanel Spacing="8" IsVisible="{Binding Selected}">
+                    <Grid ColumnDefinitions="*,Auto"><TextBlock Text="音量" FontSize="12" /><TextBlock Grid.Column="1" Text="{Binding VolumeLabel}" FontSize="12" /></Grid>
+                    <Slider Minimum="0" Maximum="100" Value="{Binding Volume}" Height="28" />
+                    <Grid ColumnDefinitions="*,Auto,Auto" ColumnSpacing="10">
+                      <TextBlock Text="播放延迟" FontSize="12" VerticalAlignment="Center" />
+                      <TextBlock Grid.Column="1" Text="{Binding DelayLabel}" FontSize="12" VerticalAlignment="Center" Opacity="0.65" />
+                      <Button Grid.Column="2" Content="{Binding ExpandLabel}" Command="{Binding ToggleDelayCommand}" Padding="10,5" />
+                    </Grid>
+                      <StackPanel Spacing="10" IsVisible="{Binding Expanded}" Margin="0,4,0,0">
+                        <Grid ColumnDefinitions="*,Auto"><TextBlock Text="播放延迟" FontSize="12" /><TextBlock Grid.Column="1" Text="{Binding DelayLabel}" FontWeight="SemiBold" /></Grid>
+                        <Slider Minimum="0" Maximum="2000" TickFrequency="10" IsSnapToTickEnabled="True" Value="{Binding Delay}" Height="28" />
+                        <StackPanel Orientation="Horizontal" Spacing="6"><Button Content="200 ms" Command="{Binding FastCommand}" Padding="10,6" /><Button Content="500 ms" Command="{Binding BalancedCommand}" Padding="10,6" /><Button Content="1000 ms" Command="{Binding StableCommand}" Padding="10,6" /><Button Content="应用" Command="{Binding ApplyDelayCommand}" Padding="10,6" /></StackPanel>
+                        <TextBlock Text="更低响应更快；卡顿时调高。应用后仅此音箱短暂重连，设置自动记住。数值不代表实测总延迟。" FontSize="11" Opacity="0.7" TextWrapping="Wrap" />
+                      </StackPanel>
+                  </StackPanel>
+                </StackPanel>
+              </Border>
+            </DataTemplate></ItemsControl.ItemTemplate>
+          </ItemsControl>
+        </StackPanel>
+      </ScrollViewer>
+    </Grid>
+    <StackPanel Grid.Row="3" Spacing="8">
+      <TextBlock Text="{Binding ErrorText}" Foreground="#FFB4A8" TextWrapping="Wrap" IsVisible="{Binding HasError}" FontSize="12" />
+      <Grid ColumnDefinitions="*,Auto,Auto" ColumnSpacing="6"><TextBlock Text="关闭窗口后继续投放" FontSize="11" Foreground="#ABBAC8" VerticalAlignment="Center" /><Button Grid.Column="1" Content="音频权限" IsVisible="{Binding IsMac}" Command="{Binding PermissionCommand}" Padding="9,7" /><Button Grid.Column="2" Content="诊断" Command="{Binding ExportCommand}" Padding="9,7" /></Grid>
+    </StackPanel>
   </Grid>
 </Window>

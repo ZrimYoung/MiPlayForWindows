@@ -25,7 +25,7 @@ public sealed class WindowsAudioPlatform : IDesktopAudioPlatform
     public IReadOnlyList<AudioSourceItem> GetOutputDevices() => [GetDefaultOutputDevice()];
     public IReadOnlyList<AudioSourceItem> GetCandidateProcesses() => [];
     public IAudioCaptureSource CreateCapture(CaptureSelection selection) => selection is CaptureSelection.SystemMix system
-        ? new SystemLoopbackCaptureSource(system) : throw new NotSupportedException("首版支持系统声音投放。");
+        ? system.MuteLocalOutput ? throw new NotSupportedException("Windows 系统混音采集暂不支持静音本机。") : new SystemLoopbackCaptureSource(system) : throw new NotSupportedException("首版支持系统声音投放。");
     public IMediaPacingClock CreateMediaClock() => MiPlayMediaPacingClock.Create();
     public void Dispose() => SystemEvents.PowerModeChanged -= OnPowerModeChanged;
 }

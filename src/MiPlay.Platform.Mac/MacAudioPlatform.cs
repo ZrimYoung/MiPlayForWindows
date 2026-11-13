@@ -13,7 +13,7 @@ internal static class NativeAudio
     private const string Library = "MiPlayAudio";
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)] internal delegate void SleepCallback();
     [DllImport(Library, CallingConvention = CallingConvention.Cdecl)] internal static extern int mp_default_output(StringBuilder uid, int capacity);
-    [DllImport(Library, CallingConvention = CallingConvention.Cdecl)] internal static extern int mp_start([MarshalAs(UnmanagedType.LPUTF8Str)] string uid, out IntPtr handle);
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl)] internal static extern int mp_start([MarshalAs(UnmanagedType.LPUTF8Str)] string uid, int mute, out IntPtr handle);
     [DllImport(Library, CallingConvention = CallingConvention.Cdecl)] internal static extern int mp_read(IntPtr handle, [Out] byte[] pcm, int capacity, out ulong endTimeNs);
     [DllImport(Library, CallingConvention = CallingConvention.Cdecl)] internal static extern void mp_stop(IntPtr handle);
     [DllImport(Library, CallingConvention = CallingConvention.Cdecl)] internal static extern void mp_wait_nanos(ulong nanos);
@@ -26,6 +26,7 @@ public sealed class MacAudioPlatform : IDesktopAudioPlatform
 {
     private readonly NativeAudio.SleepCallback sleepCallback;
     private IntPtr sleepObserver;
+    public bool SupportsLocalMute => true;
     public event EventHandler? Suspending;
     public MacAudioPlatform()
     {
@@ -88,7 +89,7 @@ internal sealed class MacCaptureSource(CaptureSelection.SystemMix selection) : I
         {
             if (handle != IntPtr.Zero) throw new InvalidOperationException("音频采集已经启动。");
             token.ThrowIfCancellationRequested();
-            var status = NativeAudio.mp_start(selection.EndpointId, out handle);
+            var status = NativeAudio.mp_start(selection.EndpointId, selection.MuteLocalOutput ? 1 : 0, out handle);
             if (status != 0)
             {
                 if (status == 0x7065726d) throw new UnauthorizedAccessException("系统未允许音频录制。");

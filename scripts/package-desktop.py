@@ -29,7 +29,7 @@ def main():
     ffmpeg, archive = dependency.prepare(args.platform)
     rid = "osx-arm64" if args.platform == "macos" else "win-x64"
     artifacts = ROOT / "artifacts/desktop"
-    stage = artifacts / rid
+    stage = artifacts / "0.4.0" / rid
     if stage.exists():
         shutil.rmtree(stage)
     if args.platform == "macos":
@@ -41,7 +41,7 @@ def main():
         output = stage / "MiPlayDesktop"
         resources = output
     output.mkdir(parents=True)
-    publish = [os.environ.get("MIPLAY_DOTNET", "dotnet"), "publish", "src/MiPlay.Desktop/MiPlay.Desktop.csproj",
+    publish = [os.environ.get("MIPLAY_DOTNET", "dotnet"), "publish", ("src/MiPlay.Engine/MiPlay.Engine.csproj" if args.platform == "macos" else "src/MiPlay.Desktop/MiPlay.Desktop.csproj"),
                "-c", "Release", "-r", rid, "--self-contained", "true", "-o", str(output), "-m:1", "-p:UseSharedCompilation=false"]
     if args.platform == "windows":
         publish.append("-p:DesktopPlatform=Windows")
@@ -64,6 +64,7 @@ def main():
             run(output / "MiPlay.Desktop.exe", "--self-check")
     else:
         run("bash", "native/macos/build.sh", output)
+        run("bash", "native/macos/build-app.sh", output)
         shutil.copy2(ffmpeg, output / "ffmpeg")
         notices = resources / "third-party/ffmpeg"
         notices.mkdir(parents=True)
@@ -73,8 +74,8 @@ def main():
         with (app / "Contents/Info.plist").open("wb") as file:
             plistlib.dump({"CFBundleName": "MiPlay Desktop", "CFBundleDisplayName": "MiPlay Desktop",
                           "CFBundleIdentifier": "com.zrim.miplaydesktop", "CFBundleExecutable": "MiPlay.Desktop",
-                          "CFBundlePackageType": "APPL", "CFBundleShortVersionString": "0.3.0", "CFBundleVersion": "1",
-                          "LSMinimumSystemVersion": "14.2", "NSHighResolutionCapable": True,
+                          "CFBundlePackageType": "APPL", "CFBundleShortVersionString": "0.4.0", "CFBundleVersion": "1",
+                          "LSMinimumSystemVersion": "14.2", "NSHighResolutionCapable": True, "LSMultipleInstancesProhibited": True,
                           "NSAudioCaptureUsageDescription": "捕获电脑正在播放的声音，并投放到你选择的小米妙播音箱。",
                           "NSLocalNetworkUsageDescription": "查找并连接同一局域网中的小米妙播音箱。",
                           "NSBonjourServices": ["_mi-connect._udp"]}, file)
@@ -109,7 +110,7 @@ def main():
         run("codesign", "--force", "--sign", "-", app)
         run("codesign", "--verify", "--deep", "--strict", app)
         run(executable, "--self-check")
-    destination = artifacts / f"MiPlayDesktop-0.3.0-{rid}.zip"
+    destination = artifacts / f"MiPlayDesktop-0.4.0-{rid}.zip"
     destination.unlink(missing_ok=True)
     if args.platform == "macos":
         run("ditto", "-c", "-k", "--sequesterRsrc", "--keepParent", app, destination)

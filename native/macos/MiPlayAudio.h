@@ -4,7 +4,7 @@
 extern "C" {
 #endif
 int mp_default_output(char *uid, int capacity);
-int mp_start(const char *uid, void **handle);
+int mp_start(const char *uid, int mute, void **handle);
 // Nonblocking worker-thread read. Returns PCM bytes, zero if empty, or a negative error.
 int mp_read(void *handle, unsigned char *pcm, int capacity, uint64_t *end_time_ns);
 void mp_stop(void *handle);

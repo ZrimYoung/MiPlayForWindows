@@ -29,12 +29,12 @@ public partial class App : Application
                 platform = new Platform.Mac.MacAudioPlatform();
 #endif
                 var discovery = new SpeakerDiscovery();
-                viewModel = new MainViewModel(new CastService(platform, discovery), discovery, store);
+                viewModel = new MainViewModel(new DesktopController(platform, discovery, store));
                 window = new MainWindow { DataContext = viewModel };
                 window.Closing += (_, e) => { if (!quitting) { e.Cancel = true; window.Hide(); } };
                 desktop.MainWindow = window;
                 desktop.ShutdownRequested += (_, e) => { if (!quitting) { e.Cancel = true; Quit(this, EventArgs.Empty); } };
-                window.Opened += async (_, _) => await viewModel.RefreshAsync();
+                window.Opened += (_, _) => viewModel.StartDiscovery();
             }
             catch (Exception exception)
             {

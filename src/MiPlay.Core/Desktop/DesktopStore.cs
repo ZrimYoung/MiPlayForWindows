@@ -5,7 +5,9 @@ using MiPlay.Desktop.Services;
 
 namespace MiPlay.Desktop;
 
-public sealed record DesktopSettings(string? LastSpeakerId = null);
+public sealed record SpeakerPreferences(string Name = "", string Model = "", int? Volume = null, int DelayMilliseconds = 1000);
+public sealed record DesktopSettings(string? LastSpeakerId = null, bool MuteLocalOutput = false,
+    Dictionary<string, SpeakerPreferences>? Speakers = null);
 
 public sealed class DesktopStore
 {
@@ -27,9 +29,12 @@ public sealed class DesktopStore
     }
     public void Save(DesktopSettings settings)
     {
+        lock (sync)
+        {
         var temporary = SettingsPath + ".tmp";
         File.WriteAllText(temporary, JsonSerializer.Serialize(settings));
         File.Move(temporary, SettingsPath, true);
+        }
     }
     public void Log(string category, string message, CastStatus? status = null)
     {

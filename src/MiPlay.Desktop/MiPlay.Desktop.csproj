@@ -6,7 +6,7 @@
     <EnableWindowsTargeting>true</EnableWindowsTargeting>
     <AvaloniaUseCompiledBindingsByDefault>true</AvaloniaUseCompiledBindingsByDefault>
     <ApplicationManifest>app.manifest</ApplicationManifest>
-    <Version>0.3.0</Version>
+    <Version>0.4.0</Version>
     <AssemblyName>MiPlay.Desktop</AssemblyName>
     <DefineConstants Condition="'$(TargetFramework)' == 'net10.0-windows10.0.22000.0'">$(DefineConstants);WINDOWS_DESKTOP</DefineConstants>
   </PropertyGroup>

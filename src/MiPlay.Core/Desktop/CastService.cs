@@ -16,6 +16,7 @@ public sealed class CastService : IAsyncDisposable
     private CancellationTokenSource? lifetime;
     private Task? run;
     private ICastSession? active;
+    private int? desiredVolume;
     private bool disposed;
     public CastStatus Status { get; private set; } = new(DesktopCastState.Idle, "选择音箱后开始投放");
     public event EventHandler<CastStatus>? StatusChanged;
@@ -32,8 +33,9 @@ public sealed class CastService : IAsyncDisposable
         platform.Suspending += OnSuspending;
     }
 
-    public async Task StartAsync(Speaker speaker, CancellationToken token = default)
+    public async Task StartAsync(Speaker speaker, CancellationToken token = default, int delayMilliseconds = 1000)
     {
+        if (delayMilliseconds is < 0 or > 2000) throw new ArgumentOutOfRangeException(nameof(delayMilliseconds));
         var ready = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         await gate.WaitAsync(token).ConfigureAwait(false);
         try
@@ -42,7 +44,7 @@ public sealed class CastService : IAsyncDisposable
             if (run is { IsCompleted: false }) throw new InvalidOperationException("请先停止当前投放。");
             lifetime?.Dispose();
             lifetime = CancellationTokenSource.CreateLinkedTokenSource(token);
-            run = RunAsync(speaker, ready, lifetime.Token);
+            run = RunAsync(speaker, ready, lifetime.Token, delayMilliseconds);
         }
         finally { gate.Release(); }
         await ready.Task.ConfigureAwait(false);
@@ -65,12 +67,13 @@ public sealed class CastService : IAsyncDisposable
 
     public async Task SetVolumeAsync(int volume, CancellationToken token = default)
     {
+        desiredVolume = Math.Clamp(volume, 0, 100);
         var session = active;
         if (session is null || Status.State != DesktopCastState.Casting) return;
         await session.SetVolumeAsync(Math.Clamp(volume, 0, 100), token).ConfigureAwait(false);
     }
 
-    private async Task RunAsync(Speaker selected, TaskCompletionSource ready, CancellationToken token)
+    private async Task RunAsync(Speaker selected, TaskCompletionSource ready, CancellationToken token, int delayMilliseconds)
     {
         var everStreamed = false;
         try
@@ -113,9 +116,10 @@ public sealed class CastService : IAsyncDisposable
                         var output = platform.GetDefaultOutputDevice();
                         attempt.CancelAfter(TimeSpan.FromSeconds(30));
                         await session.StartAsync(new(selected.Renderer,
-                            new CaptureSelection.SystemMix(output.Id, output.DisplayName), path), attempt.Token).ConfigureAwait(false);
+                            new CaptureSelection.SystemMix(output.Id, output.DisplayName), path, PlaybackDelayMicroseconds: delayMilliseconds * 1000), attempt.Token).ConfigureAwait(false);
                         attempt.CancelAfter(Timeout.InfiniteTimeSpan);
                         token.ThrowIfCancellationRequested();
+                        if (desiredVolume is { } savedVolume) await session.SetVolumeAsync(savedVolume, token).ConfigureAwait(false);
                         everStreamed = true;
                         Publish(new(DesktopCastState.Casting, $"正在投放到 {selected.Name}", Diagnostics: session.Diagnostics));
                         ready.TrySetResult();

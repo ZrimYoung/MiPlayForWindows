@@ -2,14 +2,16 @@
 
 ## 本 fork：Windows / macOS 桌面测试版
 
-新增 `MiPlay.Desktop`：使用统一界面捕获系统默认输出，通过 MiPlay 投放到单台音箱；电脑本地继续出声。
-共享核心已从 Windows 专用项目提取，旧版 WinUI 程序保留作回归对照。
+0.4 支持点选多台妙播音箱，逐台保存音量与播放延迟，并持续发现局域网设备。
+Mac 使用 SwiftUI 原生界面与菜单栏；Windows 使用 Avalonia 设备卡片。Mac 提供“仅音箱播放（实验）”。
+MiPlay 共享协议核心继续使用 C#，旧版 WinUI 程序保留作回归对照。
 
 - 开发与打包：[desktop-development.md](docs/desktop-development.md)
 - 验证边界和目标设备：[desktop-validation.md](docs/desktop-validation.md)
-- 新版入口：`dotnet run --project src/MiPlay.Desktop/MiPlay.Desktop.csproj`
+- Mac 原生测试包：`python3 scripts/package-desktop.py macos`
+- Windows 界面入口：`dotnet run --project src/MiPlay.Desktop/MiPlay.Desktop.csproj`
 
-当前为个人测试开发版本。小爱音箱 Art、Xiaomi 智能音箱 Pro 的实际听音与稳定性待真机验证。
+当前为个人测试版本。用户已反馈上一版可听，详细型号／固件尚待登记；本次多音箱、延迟与静音的实际效果仍需真机验证。
 上游主程序复用授权待确认，本 fork 未自行添加覆盖继承代码的许可证。
 
 ## 上游 Windows 版本说明

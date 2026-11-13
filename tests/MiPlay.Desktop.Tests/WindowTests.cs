@@ -35,9 +35,8 @@ public sealed class WindowTests
         {
             using var platform = new NoAudioPlatform();
             var discovery = new PreviewDiscovery();
-            var session = new PreviewSession();
-            var service = new CastService(platform, discovery, () => session, () => "test");
-            await using var vm = new MainViewModel(service, discovery, new DesktopStore(directory.FullName));
+            var controller = new DesktopController(platform, discovery, new DesktopStore(directory.FullName), () => new PreviewSession(), () => "test");
+            await using var vm = new MainViewModel(controller);
             var window = new MainWindow { DataContext = vm };
             try
             {
@@ -45,12 +44,20 @@ public sealed class WindowTests
                 await vm.RefreshAsync();
                 Dispatcher.UIThread.RunJobs();
                 Assert.Equal(2, vm.Speakers.Count);
-                Assert.False(vm.StartCommand.CanExecute(null));
-                var picker = window.GetVisualDescendants().OfType<ComboBox>().Single();
-                picker.SelectedIndex = 0;
+                Assert.False(vm.StopCommand.CanExecute(null));
+                var first = vm.Speakers[0];
+                first.ToggleCommand.Execute(null);
+                await WaitFor(() => first.Selected && first.StateText.Contains("投放"));
+                vm.Speakers[1].ToggleCommand.Execute(null);
+                await WaitFor(() => vm.Speakers.All(s => s.Selected));
+                first.Expanded = true;
+                first.Volume = 38;
+                first.Delay = 200;
+                first.ApplyDelayCommand.Execute(null);
+                await Task.Delay(250);
                 Dispatcher.UIThread.RunJobs();
-                Assert.Equal("小爱音箱 Art", vm.SelectedSpeaker!.Name);
-                Assert.True(vm.StartCommand.CanExecute(null));
+                Assert.Equal(2, window.GetVisualDescendants().OfType<CheckBox>().Count(c => c.IsChecked == true));
+                Assert.True(vm.StopCommand.CanExecute(null));
                 var screenshot = Environment.GetEnvironmentVariable("MIPLAY_UI_SNAPSHOT");
                 if (!string.IsNullOrEmpty(screenshot))
                 {
@@ -59,14 +66,11 @@ public sealed class WindowTests
                     Assert.NotNull(bitmap);
                     bitmap.Save(screenshot, new Avalonia.Media.Imaging.PngBitmapEncoderOptions());
                 }
-                vm.StartCommand.Execute(null);
-                await WaitFor(() => vm.IsCasting);
-                Assert.False(picker.IsEnabled);
-                Assert.True(vm.StopCommand.CanExecute(null));
                 await vm.StopAsync();
-                await WaitFor(() => vm.CanSelectSpeaker);
-                Assert.True(session.Disposed);
-                Assert.True(picker.IsEnabled);
+                await WaitFor(() => vm.Speakers.All(s => !s.Selected));
+                Assert.False(vm.StopCommand.CanExecute(null));
+                Assert.Equal(200, controller.Snapshot.Speakers[0].DelayMilliseconds);
+                Assert.Equal(38, controller.Snapshot.Speakers[0].Volume);
             }
             finally { window.Close(); }
         }

@@ -122,7 +122,7 @@ int mp_default_output(char *uid, int capacity) {
     }
 }
 
-int mp_start(const char *uid, void **handle) {
+int mp_start(const char *uid, int mute, void **handle) {
     @autoreleasepool {
         if (!handle || !uid) return -1;
         *handle = nullptr;
@@ -132,7 +132,7 @@ int mp_start(const char *uid, void **handle) {
                 andDeviceUID:[NSString stringWithUTF8String:uid] withStream:0];
             description.name = @"MiPlay Desktop Audio";
             description.privateTap = YES;
-            description.muteBehavior = CATapUnmuted;
+            description.muteBehavior = mute ? CATapMutedWhenTapped : CATapUnmuted;
             auto status = AudioHardwareCreateProcessTap(description, &capture->tap);
             if (status != noErr) return status;
             AudioObjectPropertyAddress address{kAudioTapPropertyFormat, kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain};
