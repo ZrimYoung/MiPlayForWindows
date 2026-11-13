@@ -1,5 +1,19 @@
 # MiPlay Cast
 
+## 本 fork：Windows / macOS 桌面测试版
+
+新增 `MiPlay.Desktop`：使用统一界面捕获系统默认输出，通过 MiPlay 投放到单台音箱；电脑本地继续出声。
+共享核心已从 Windows 专用项目提取，旧版 WinUI 程序保留作回归对照。
+
+- 开发与打包：[desktop-development.md](docs/desktop-development.md)
+- 验证边界和目标设备：[desktop-validation.md](docs/desktop-validation.md)
+- 新版入口：`dotnet run --project src/MiPlay.Desktop/MiPlay.Desktop.csproj`
+
+当前为个人测试开发版本。小爱音箱 Art、Xiaomi 智能音箱 Pro 的实际听音与稳定性待真机验证。
+上游主程序复用授权待确认，本 fork 未自行添加覆盖继承代码的许可证。
+
+## 上游 Windows 版本说明
+
 把 Windows 正在播放的声音投到局域网音箱。
 
 项目同时支持普通 DLNA 音箱和小米音箱的 MiPlay 音频路径。DLNA 的兼容面更广，MiPlay 的延迟通常更低，但也更依赖具体型号和固件。它目前仍是一个面向自用和实验的 Windows 工具，不是通用投屏 SDK。

@@ -6,6 +6,7 @@
     <RootNamespace>DLNACast.Core</RootNamespace>
   </PropertyGroup>
   <ItemGroup>
+    <ProjectReference Include="../MiPlay.Core/MiPlay.Core.csproj" />
     <PackageReference Include="NAudio" Version="2.3.0" />
     <PackageReference Include="NAudio.Lame" Version="2.1.0" />
     <PackageReference Include="Rssdp" Version="5.0.0" />

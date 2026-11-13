@@ -6,7 +6,7 @@ namespace DLNACast.Core.MiPlay;
 /// Streaming PCM-to-ADTS adapter for the MiPlay WFD source path. It owns only
 /// a local FFmpeg child process and never opens a network endpoint.
 /// </summary>
-public sealed class MiPlayFfmpegAacEncoder : IAsyncDisposable
+public sealed class MiPlayFfmpegAacEncoder : DLNACast.Core.Abstractions.IAacEncoder
 {
     public const int InputSampleRate = 48_000;
     public const int InputChannels = 2;

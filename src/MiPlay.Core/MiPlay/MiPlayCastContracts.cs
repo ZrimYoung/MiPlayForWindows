@@ -21,6 +21,7 @@ public enum MiPlayCastFailureKind
     None,
     ReceiverBusy,
     TransportStall,
+    CaptureFailed,
 }
 
 public sealed record MiPlayCastDiagnostics(

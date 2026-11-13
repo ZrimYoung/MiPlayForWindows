@@ -1,0 +1,56 @@
+<Window xmlns="https://github.com/avaloniaui" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:local="using:MiPlay.Desktop" x:Class="MiPlay.Desktop.MainWindow" x:DataType="local:MainViewModel"
+        Title="MiPlay Desktop" Width="580" Height="720" MinWidth="500" MinHeight="620"
+        Background="#F5F7F6" Icon="/Assets/app.ico">
+  <Window.Styles>
+    <Style Selector="TextBlock"><Setter Property="Foreground" Value="#192C29" /></Style>
+    <Style Selector="Button"><Setter Property="Padding" Value="18,10" /><Setter Property="CornerRadius" Value="8" /></Style>
+    <Style Selector="Button.primary"><Setter Property="Background" Value="#146B55" /><Setter Property="Foreground" Value="White" /></Style>
+    <Style Selector="Border.card"><Setter Property="Background" Value="White" /><Setter Property="CornerRadius" Value="16" /><Setter Property="Padding" Value="24" /></Style>
+  </Window.Styles>
+  <Grid Margin="28" RowDefinitions="Auto,*,Auto" RowSpacing="20">
+    <StackPanel Spacing="6">
+      <TextBlock Text="MiPlay" FontSize="30" FontWeight="SemiBold" />
+      <TextBlock Text="把电脑的声音，交给音箱。" FontSize="14" Foreground="#61746D" />
+    </StackPanel>
+    <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto">
+      <StackPanel Spacing="16">
+        <Border Classes="card">
+          <StackPanel Spacing="16">
+            <Grid ColumnDefinitions="*,Auto">
+              <TextBlock Text="选择音箱" FontSize="17" FontWeight="SemiBold" VerticalAlignment="Center" />
+              <Button Grid.Column="1" Content="刷新" Command="{Binding RefreshCommand}" />
+            </Grid>
+            <ComboBox ItemsSource="{Binding Speakers}" SelectedItem="{Binding SelectedSpeaker}" HorizontalAlignment="Stretch"
+                      PlaceholderText="请选择同一网络中的音箱" IsEnabled="{Binding CanSelectSpeaker}" />
+            <TextBlock Text="{Binding DiscoveryHint}" FontSize="12" Foreground="#61746D" TextWrapping="Wrap" />
+          </StackPanel>
+        </Border>
+        <Border Classes="card">
+          <StackPanel Spacing="16">
+            <TextBlock Text="系统声音" FontSize="17" FontWeight="SemiBold" />
+            <TextBlock Text="捕获默认输出设备的声音，电脑也会继续播放。" Foreground="#61746D" TextWrapping="Wrap" />
+            <Border Background="#EDF6F2" CornerRadius="8" Padding="14">
+              <TextBlock Text="{Binding StatusText}" TextWrapping="Wrap" />
+            </Border>
+            <Grid ColumnDefinitions="*,*" ColumnSpacing="12">
+              <Button Classes="primary" Content="开始投放" Command="{Binding StartCommand}" HorizontalAlignment="Stretch" HorizontalContentAlignment="Center" />
+              <Button Grid.Column="1" Content="停止" Command="{Binding StopCommand}" HorizontalAlignment="Stretch" HorizontalContentAlignment="Center" />
+            </Grid>
+            <Grid ColumnDefinitions="Auto,*,Auto" ColumnSpacing="12">
+              <TextBlock Text="音箱音量" VerticalAlignment="Center" />
+              <Slider Grid.Column="1" Minimum="0" Maximum="100" Value="{Binding Volume}" IsEnabled="{Binding IsCasting}" />
+              <TextBlock Grid.Column="2" Text="{Binding VolumeLabel}" VerticalAlignment="Center" MinWidth="28" />
+            </Grid>
+          </StackPanel>
+        </Border>
+        <TextBlock Text="{Binding ErrorText}" Foreground="#A63E35" TextWrapping="Wrap" IsVisible="{Binding HasError}" />
+      </StackPanel>
+    </ScrollViewer>
+    <Grid Grid.Row="2" ColumnDefinitions="*,Auto,Auto" ColumnSpacing="8">
+      <TextBlock Text="关闭窗口后仍可后台投放" FontSize="11" Foreground="#61746D" VerticalAlignment="Center" />
+      <Button Grid.Column="1" Content="音频权限" IsVisible="{Binding IsMac}" Command="{Binding PermissionCommand}" Padding="10,8" />
+      <Button Grid.Column="2" Content="导出诊断" Command="{Binding ExportCommand}" Padding="10,8" />
+    </Grid>
+  </Grid>
+</Window>

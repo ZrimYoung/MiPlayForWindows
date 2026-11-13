@@ -1,4 +1,4 @@
-using Windows.System.UserProfile;
+using System.Globalization;
 
 namespace DLNACast.Core.Localization;
 
@@ -22,7 +22,7 @@ public static class SystemLanguage
     {
         try
         {
-            return GlobalizationPreferences.Languages.FirstOrDefault() ?? "en-US";
+            return CultureInfo.CurrentUICulture.Name;
         }
         catch
         {

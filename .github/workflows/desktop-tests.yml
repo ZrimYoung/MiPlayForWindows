@@ -1,0 +1,57 @@
+name: Desktop validation and test artifacts
+on:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  desktop:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            platform: windows
+          - os: macos-15
+            platform: macos
+    runs-on: ${{ matrix.os }}
+    env:
+      DOTNET_CLI_TELEMETRY_OPTOUT: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Prepare pinned AAC encoder
+        shell: pwsh
+        run: |
+          $lines = @(python scripts/prepare-desktop-ffmpeg.py ${{ matrix.platform }})
+          if ($LASTEXITCODE -ne 0) { throw 'FFmpeg preparation failed' }
+          "MIPLAY_TEST_FFMPEG=$($lines[-1])" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+      - name: Portable protocol, lifecycle and actual AAC tests
+        run: dotnet test tests/MiPlay.Tests/MiPlay.Tests.csproj -c Release --logger "trx;LogFileName=portable.trx"
+      - name: Original Windows application build
+        if: runner.os == 'Windows'
+        run: dotnet build src/DLNACast.App/DLNACast.App.csproj -c Release -p:Platform=x64
+      - name: Original Windows regressions
+        if: runner.os == 'Windows'
+        run: dotnet test tests/DLNACast.Tests/DLNACast.Tests.csproj -c Release -p:Platform=x64 --filter "FullyQualifiedName!~WindowsAudioPolicyTests" --logger "trx;LogFileName=legacy-windows.trx"
+      - name: Desktop UI bindings
+        run: dotnet test tests/MiPlay.Desktop.Tests/MiPlay.Desktop.Tests.csproj -c Release --logger "trx;LogFileName=desktop-ui.trx"
+      - name: Native resampler tests
+        if: runner.os == 'macOS'
+        run: bash native/macos/build.sh artifacts/native --test
+      - name: Package local test build
+        run: python scripts/package-desktop.py ${{ matrix.platform }}
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: desktop-${{ matrix.platform }}
+          path: |
+            artifacts/desktop/*.zip
+            artifacts/desktop/*.sha256
+            tests/**/TestResults/*.trx
+          if-no-files-found: warn

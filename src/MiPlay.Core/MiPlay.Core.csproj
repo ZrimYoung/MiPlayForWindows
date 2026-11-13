@@ -1,0 +1,14 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <AssemblyName>MiPlay.Core</AssemblyName>
+    <RootNamespace>DLNACast.Core</RootNamespace>
+  </PropertyGroup>
+  <ItemGroup>
+    <InternalsVisibleTo Include="DLNACast.Core" />
+    <InternalsVisibleTo Include="DLNACast.Tests" />
+    <InternalsVisibleTo Include="MiPlay.Tests" />
+    <InternalsVisibleTo Include="MiPlay.Platform.Mac" />
+    <InternalsVisibleTo Include="MiPlay.Platform.Windows" />
+  </ItemGroup>
+</Project>

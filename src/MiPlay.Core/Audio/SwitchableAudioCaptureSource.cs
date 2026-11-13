@@ -24,6 +24,7 @@ public sealed class SwitchableAudioCaptureSource(
     internal bool IsPaused => _paused;
     public CaptureHealth Health => _active?.Health ?? new(DateTimeOffset.UtcNow, null, null, 0);
     public event EventHandler<Exception>? CaptureFailed;
+    public Exception? LastFailure { get; private set; }
 
     public async Task StartAsync(PcmFrameBuffer destination, CancellationToken cancellationToken)
     {
@@ -52,6 +53,7 @@ public sealed class SwitchableAudioCaptureSource(
 
             _destination = destination;
             _active = capture;
+            LastFailure = null;
             _paused = false;
         }
         finally
@@ -91,6 +93,7 @@ public sealed class SwitchableAudioCaptureSource(
 
             var previous = _active;
             _active = replacement;
+            LastFailure = null;
             _selection = selection;
             previous.CaptureFailed -= OnCaptureFailed;
             try
@@ -218,7 +221,11 @@ public sealed class SwitchableAudioCaptureSource(
 
     private void OnCaptureFailed(object? sender, Exception exception)
     {
-        if (ReferenceEquals(sender, _active)) CaptureFailed?.Invoke(this, exception);
+        if (ReferenceEquals(sender, _active))
+        {
+            LastFailure = exception;
+            CaptureFailed?.Invoke(this, exception);
+        }
     }
 
     private void ThrowIfDisposed() =>

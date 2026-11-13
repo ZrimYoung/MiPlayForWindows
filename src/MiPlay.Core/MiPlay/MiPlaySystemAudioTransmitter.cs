@@ -357,6 +357,8 @@ public sealed class MiPlaySystemAudioTransmitter : IAsyncDisposable
         Exception exception,
         bool wasStreaming)
     {
+        if (exception is global::MiPlay.Desktop.Services.AudioCaptureException)
+            return MiPlayCastFailureKind.CaptureFailed;
         if (exception.ToString().Contains(
                 "shared MiPlay audio socket remained blocked",
                 StringComparison.OrdinalIgnoreCase))

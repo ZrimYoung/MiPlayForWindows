@@ -17,7 +17,8 @@ public static class MiPlayFfmpegLocator
         }
 
         var baseDirectory = applicationDirectory ?? AppContext.BaseDirectory;
-        var adjacent = Path.Combine(baseDirectory, "ffmpeg.exe");
+        var executableName = OperatingSystem.IsWindows() ? "ffmpeg.exe" : "ffmpeg";
+        var adjacent = Path.Combine(baseDirectory, executableName);
         if (File.Exists(adjacent))
         {
             return Path.GetFullPath(adjacent);
@@ -33,7 +34,7 @@ public static class MiPlayFfmpegLocator
         {
             try
             {
-                var candidate = Path.Combine(directory.Trim(), "ffmpeg.exe");
+                var candidate = Path.Combine(directory.Trim(), executableName);
                 if (File.Exists(candidate))
                 {
                     return Path.GetFullPath(candidate);
@@ -49,8 +50,8 @@ public static class MiPlayFfmpegLocator
     public static string RequireExecutable()
     {
         return FindExecutable() ?? throw new FileNotFoundException(
-            "MiPlay requires ffmpeg.exe with the Windows Media Foundation AAC encoder. " +
-            $"Place ffmpeg.exe beside the app, add it to PATH, or set {EnvironmentVariableName}.");
+            "MiPlay requires a compatible FFmpeg AAC encoder. " +
+            $"Place FFmpeg beside the app, add it to PATH, or set {EnvironmentVariableName}.");
     }
 
     private static bool IsExecutable(string? path) =>

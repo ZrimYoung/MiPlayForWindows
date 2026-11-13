@@ -46,7 +46,7 @@ public partial class App : Microsoft.UI.Xaml.Application
             new LiveStreamServer(),
             localOutputs);
         MiPlaySystemAudioTransmitter CreateMiPlayTransmitter() => new(
-            new MiPlayLegacySystemAudioSessionRunner(audioCatalog));
+            new MiPlayLegacySystemAudioSessionRunner(audioCatalog, clockFactory: MiPlayMediaPacingClock.Create));
         _viewModel = new MainViewModel(
             audioCatalog,
             _discovery,

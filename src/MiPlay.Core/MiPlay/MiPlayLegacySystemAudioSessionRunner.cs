@@ -20,7 +20,10 @@ namespace DLNACast.Core.MiPlay;
 /// tablet's native addMirror/deleteMirror behavior instead of inventing an
 /// unsupported receiver command.
 /// </summary>
-public sealed class MiPlayLegacySystemAudioSessionRunner(IAudioSourceCatalog audioSources) :
+public sealed class MiPlayLegacySystemAudioSessionRunner(
+    IAudioSourceCatalog audioSources,
+    IAacEncoderFactory? encoderFactory = null,
+    Func<IMediaPacingClock>? clockFactory = null) :
     IMiPlaySystemAudioSessionRunner,
     IMiPlayReceiverVolumeController,
     IMiPlayAudioCaptureController,
@@ -34,6 +37,9 @@ public sealed class MiPlayLegacySystemAudioSessionRunner(IAudioSourceCatalog aud
         MiPlayLegacyStatusQueryOrder.VolumeStateMediaInfo;
 
     private readonly IAudioSourceCatalog audioSources = audioSources ?? throw new ArgumentNullException(nameof(audioSources));
+    private readonly IAacEncoderFactory encoderFactory = encoderFactory ?? new FfmpegAacEncoderFactory(
+        OperatingSystem.IsWindows() ? "aac_mf" : "aac");
+    private readonly Func<IMediaPacingClock> clockFactory = clockFactory ?? (() => new MonotonicMediaPacingClock());
     private readonly Lock volumeSync = new();
     private readonly Lock playbackSync = new();
     private readonly SemaphoreSlim captureGate = new(1, 1);
@@ -407,10 +413,9 @@ public sealed class MiPlayLegacySystemAudioSessionRunner(IAudioSourceCatalog aud
             ? new MiPlayExplicitPlaybackGate()
             : null;
         await using var encoder = ownsEncoder
-            ? MiPlayFfmpegAacEncoder.Start(
+            ? encoderFactory.Start(
                 request.FfmpegPath,
-                MiPlayProtocolConstants.AacBitRate,
-                "aac_mf")
+                MiPlayProtocolConstants.AacBitRate)
             : null;
         var encodedAccessUnits = encoder is null
             ? null
@@ -440,6 +445,8 @@ public sealed class MiPlayLegacySystemAudioSessionRunner(IAudioSourceCatalog aud
                 }
                 while (!encoderInputRun.IsCancellationRequested)
                 {
+                    if (capture.LastFailure is { } captureFailure)
+                        throw new global::MiPlay.Desktop.Services.AudioCaptureException("系统音频采集已中断。", captureFailure);
                     if (explicitCapturePlaybackGate is not null)
                     {
                         await explicitCapturePlaybackGate
@@ -780,7 +787,7 @@ public sealed class MiPlayLegacySystemAudioSessionRunner(IAudioSourceCatalog aud
                     initialProgramClockReference90Khz,
                     cancellationToken)
                 .ConfigureAwait(false);
-        using var mediaPacingClock = MiPlayMediaPacingClock.Create();
+        using var mediaPacingClock = clockFactory();
         // Start pacing when a finite AAC runway is actually available. The
         // earlier receiver-ready timestamp predates aac_mf's first live batch
         // and turns every batch into an immediate catch-up burst.
