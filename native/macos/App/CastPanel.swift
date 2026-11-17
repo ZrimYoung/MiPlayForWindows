@@ -50,6 +50,7 @@ struct CastPanel: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     init(engine: EngineClient) { self.engine = engine; self.media = engine.media }
     private var selectedCount: Int { engine.snapshot.speakers.filter(\.selected).count }
+    private var speakerSections: [SpeakerSection] { SpeakerSection.group(engine.snapshot.speakers) }
     var body: some View {
         VStack(alignment: .leading, spacing: 22) {
             header
@@ -70,7 +71,11 @@ struct CastPanel: View {
                 ScrollView {
                     LazyVStack(spacing: 10) {
                         if engine.snapshot.speakers.isEmpty { emptyState }
-                        ForEach(engine.snapshot.speakers) { card in SpeakerRow(card: card, engine: engine) }
+                        ForEach(speakerSections) { section in
+                            if let groupId = section.cards.first?.groupId, !groupId.isEmpty {
+                                StereoGroupRow(cards: section.cards, groupId: groupId, engine: engine)
+                            } else if let card = section.cards.first { SpeakerRow(card: card, engine: engine) }
+                        }
                     }.padding(2)
                 }.scrollIndicators(.hidden)
             }
@@ -100,47 +105,11 @@ struct CastPanel: View {
                         .padding(.horizontal, 13).padding(.vertical, 9).modifier(SmallGlass())
                 }.buttonStyle(.plain).foregroundStyle(scheme == .dark ? Color.white : Color.primary)
             }
-            Menu {
-                Toggle("显示系统媒体信息（实验）", isOn: $media.enabled)
-                Divider()
-                Button("系统音频权限…") { openPermission() }
-                Button("导出诊断…") { engine.send("export") }
-            } label: {
-                Image(systemName: "ellipsis").font(.system(size: 14, weight: .semibold))
-                    .frame(width: 33, height: 33).modifier(SmallGlass())
-            }.menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize().help("更多设置")
+            SettingsMenuButton(engine: engine).frame(width: 33, height: 33)
+                .modifier(SmallGlass()).help("更多设置")
         }
     }
-    private var nowPlaying: some View {
-        HStack(spacing: 17) {
-            Group {
-                if let artwork = media.item?.artwork {
-                    Image(nsImage: artwork).resizable().aspectRatio(contentMode: .fill)
-                } else {
-                    ZStack {
-                        RoundedRectangle(cornerRadius: 16).fill(.regularMaterial)
-                        Image(systemName: "waveform").font(.system(size: 28, weight: .light)).foregroundStyle(accent.opacity(0.8))
-                    }
-                }
-            }
-            .frame(width: 74, height: 74).clipShape(RoundedRectangle(cornerRadius: 16))
-            .overlay(RoundedRectangle(cornerRadius: 16).strokeBorder(.white.opacity(scheme == .dark ? 0.12 : 0.6), lineWidth: 0.75))
-            .shadow(color: .black.opacity(0.07), radius: 12, x: 0, y: 5)
-            VStack(alignment: .leading, spacing: 7) {
-                Text(media.item?.title ?? "系统音频").font(.system(size: 21, weight: .semibold)).tracking(-0.4).lineLimit(2)
-                Text(subtitle).font(.system(size: 12)).foregroundStyle(.secondary).lineLimit(1)
-                HStack(spacing: 5) {
-                    Image(systemName: selectedCount > 0 ? "dot.radiowaves.left.and.right" : "laptopcomputer").font(.system(size: 10))
-                    Text(selectedCount > 0 ? "正在投放 · \(selectedCount) 台音箱" : "点选下方音箱，开始投放")
-                        .font(.system(size: 10, weight: .medium))
-                }.foregroundStyle(selectedCount > 0 ? accent : .secondary)
-            }.frame(maxWidth: .infinity, alignment: .leading)
-        }.padding(.vertical, 7)
-    }
-    private var subtitle: String {
-        guard let item = media.item else { return "此 Mac 正在播放的所有声音" }
-        return [item.artist, item.source].filter { !$0.isEmpty }.joined(separator: " · ")
-    }
+    private var nowPlaying: some View { SystemMediaCard(media: media) }
     private var localOutput: some View {
         HStack(spacing: 12) {
             Image(systemName: engine.snapshot.muteLocalOutput ? "speaker.slash" : "laptopcomputer")
@@ -177,9 +146,28 @@ struct CastPanel: View {
             }
         }.foregroundStyle(.tertiary)
     }
-    private func openPermission() {
-        NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture")!)
+}
+
+struct SpeakerSection: Identifiable {
+    let id: String
+    var cards: [SpeakerCard]
+    static func group(_ cards: [SpeakerCard]) -> [SpeakerSection] {
+        var sections: [SpeakerSection] = []
+        for card in cards {
+            let group = card.groupId ?? ""
+            let id = group.isEmpty ? "device:\(card.id)" : "group:\(group)"
+            if let index = sections.firstIndex(where: { $0.id == id }) { sections[index].cards.append(card) }
+            else { sections.append(SpeakerSection(id: id, cards: [card])) }
+        }
+        return sections
     }
+}
+
+private struct StereoGroupRow: View {
+    let cards: [SpeakerCard]
+    let groupId: String
+    @ObservedObject var engine: EngineClient
+    var body: some View { CompactSpeakerRow(cards: cards, engine: engine, showsDelay: true) }
 }
 
 private struct SpeakerRow: View {
@@ -189,14 +177,12 @@ private struct SpeakerRow: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var expanded = false
     @State private var volume = 30.0
-    @State private var delay = 1000.0
     @State private var draggingVolume = false
-    @State private var delayDirty = false
     @State private var hovering = false
     private var status: String {
         if !card.online && !card.selected { return "离线 · 保留上次设置" }
         if card.state == "Idle" { return "点选加入投放" }
-        if card.state == "Casting" { return card.message.contains("没有声音") ? "当前没有声音输入" : "正在投放" }
+        if card.state == "Casting" { return card.message.isEmpty ? "正在投放" : card.message }
         return card.message
     }
     var body: some View {
@@ -209,6 +195,10 @@ private struct SpeakerRow: View {
                         .background(card.selected ? accent.opacity(0.08) : Color.primary.opacity(0.035), in: RoundedRectangle(cornerRadius: 11))
                     VStack(alignment: .leading, spacing: 4) {
                         Text(card.name).font(.system(size: 13, weight: .semibold)).lineLimit(2).multilineTextAlignment(.leading)
+                        if let group = card.groupId, !group.isEmpty {
+                            Text(card.channel == "left" ? "左声道" : card.channel == "right" ? "右声道" : "组合成员")
+                                .font(.system(size: 9, weight: .medium)).foregroundStyle(accent)
+                        }
                         HStack(spacing: 5) {
                             if card.state == "Connecting" || card.state == "Reconnecting" { ProgressView().controlSize(.mini) }
                             Text(status).font(.system(size: 10)).foregroundStyle(card.state == "Error" ? Color.red : Color.secondary)
@@ -256,33 +246,10 @@ private struct SpeakerRow: View {
         .overlay(RoundedRectangle(cornerRadius: 18).strokeBorder(card.selected ? accent.opacity(scheme == .dark ? 0.27 : 0.19) : .primary.opacity(0.055), lineWidth: 0.75))
         .shadow(color: .black.opacity(card.selected ? (scheme == .dark ? 0.12 : 0.035) : 0), radius: 10, x: 0, y: 4)
         .onHover { hovering = $0 }
-        .onAppear { volume = Double(card.volume ?? 30); delay = Double(card.delayMilliseconds); expanded = engine.preview && CommandLine.arguments.contains("--expanded") && card.id == "art" }
+        .onAppear { volume = Double(card.volume ?? 30); expanded = engine.preview && CommandLine.arguments.contains("--expanded") && card.id == "art" }
         .onChange(of: card.volume) { _, value in if !draggingVolume, let value { volume = Double(value) } }
-        .onChange(of: card.delayMilliseconds) { _, value in
-            if Int(delay) == value { delayDirty = false }
-            if !delayDirty { delay = Double(value) }
-        }
+
     }
-    private var delayControls: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Divider().opacity(0.5)
-            HStack {
-                Text("\(Int(delay)) ms").font(.system(size: 13, weight: .semibold)).monospacedDigit()
-                Spacer()
-                Stepper("播放延迟", value: $delay, in: 0...2000, step: 10).labelsHidden().controlSize(.small)
-            }
-            Slider(value: $delay, in: 0...2000).controlSize(.small).accessibilityLabel("\(card.name)播放延迟")
-                .onChange(of: delay) { _, _ in delayDirty = true }
-            HStack(spacing: 7) {
-                ForEach([200, 500, 1000], id: \.self) { value in
-                    Button("\(value) ms") { delay = Double(value); applyDelay() }.buttonStyle(.bordered).controlSize(.small)
-                }
-                Spacer(minLength: 0)
-                Button("应用") { applyDelay() }.buttonStyle(.borderedProminent).controlSize(.small)
-            }
-            Text("更低响应更快，卡顿时调高。仅此音箱短暂重连，设置自动保存；数值不代表实测总延迟。")
-                .font(.system(size: 10)).foregroundStyle(.secondary).lineSpacing(3)
-        }
-    }
-    private func applyDelay() { engine.send("delay", id: card.id, value: Int((delay / 10).rounded()) * 10) }
+    private var delayControls: some View { RouteDelay(cards: [card], engine: engine) }
+
 }

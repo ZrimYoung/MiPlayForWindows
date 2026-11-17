@@ -24,7 +24,7 @@ internal sealed class MiPlaySharedOutputTimeline
     private uint lastTransportRecoveryDelta;
     private MiPlayOutputTimestamp current;
 
-    internal MiPlayOutputTimestamp GetTimestamp(long accessUnitIndex, ulong outputMicroseconds)
+    internal MiPlayOutputTimestamp GetTimestamp(long accessUnitIndex, ulong outputMicroseconds, bool allowForwardGap = false)
     {
         ArgumentOutOfRangeException.ThrowIfNegative(accessUnitIndex);
         lock (gate)
@@ -40,7 +40,7 @@ internal sealed class MiPlaySharedOutputTimeline
                 throw new InvalidOperationException(
                     "The requested shared output timestamp is older than the retained late-join window.");
             }
-            if (accessUnitIndex != lastAccessUnitIndex + 1)
+            if (accessUnitIndex != lastAccessUnitIndex + 1 && !allowForwardGap)
             {
                 throw new InvalidOperationException("Shared output PTS access units must remain ordered.");
             }

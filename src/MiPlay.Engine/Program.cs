@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using DLNACast.Core.MiPlay;
 using System.Text.Json;
 using System.Runtime.InteropServices;
 using MiPlay.Desktop;
@@ -36,9 +37,15 @@ async Task HandleAsync(string line)
         switch (root.GetProperty("command").GetString())
         {
             case "select": await controller.SetSelectedAsync(Id(), root.GetProperty("value").GetBoolean()); break;
+            case "selectGroup": await controller.SetGroupSelectedAsync(Id(), root.GetProperty("value").GetBoolean()); break;
             case "volume": await controller.SetVolumeAsync(Id(), root.GetProperty("value").GetInt32()); break;
+            case "groupVolume": await controller.SetGroupVolumeAsync(Id(), root.GetProperty("value").GetInt32()); break;
+            case "groupDelay": await controller.SetGroupDelayAsync(Id(), root.GetProperty("value").GetInt32()); break;
             case "delay": await controller.SetDelayAsync(Id(), root.GetProperty("value").GetInt32()); break;
             case "mute": await controller.SetMutedAsync(root.GetProperty("value").GetBoolean()); break;
+            case "synchronizedPlayback": await controller.SetSynchronizedPlaybackAsync(root.GetProperty("value").GetBoolean()); break;
+            case "audioBitRate": await controller.SetAudioBitRateAsync(root.GetProperty("value").GetInt32()); break;
+            case "media": controller.UpdateMedia(root.GetProperty("value").Deserialize<MiPlayMediaSnapshot>(json)); break;
             case "scan": await controller.RefreshAsync(); break;
             case "stopAll": await controller.StopAllAsync(); break;
             case "export": Send(new { @event = "exported", path = controller.Export() }); break;

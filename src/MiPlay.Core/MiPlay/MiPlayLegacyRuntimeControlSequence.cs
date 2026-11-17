@@ -26,6 +26,28 @@ internal sealed class MiPlayLegacyRuntimeControlSequence(
             MiPlayProtocolConstants.HeartbeatAcknowledgementCommand,
             []);
 
+    public MiPlayLegacyRuntimeControlCommand PrepareGetVolume() => Prepare(
+        MiPlayProtocolConstants.GetVolumeCommand, MiPlayProtocolConstants.GetVolumeAcknowledgementCommand, [], false);
+    public MiPlayLegacyRuntimeControlCommand PrepareGetDeviceInfo() => Prepare(
+        MiPlayProtocolConstants.GetDeviceInfoCommand, MiPlayProtocolConstants.GetDeviceInfoAcknowledgementCommand, [], false);
+
+    public MiPlayLegacyRuntimeControlCommand PrepareMediaInfo(MiPlaySetMediaInfoPayload payload) => Prepare(
+        MiPlayProtocolConstants.SetMediaInfoCommand, MiPlayProtocolConstants.SetMediaInfoAcknowledgementCommand,
+        MiPlaySetMediaInfoPayloadCodec.Encode(payload), false);
+    public MiPlayLegacyRuntimeControlCommand PreparePosition(long milliseconds)
+    {
+        if (milliseconds < 0) throw new ArgumentOutOfRangeException(nameof(milliseconds));
+        var bytes = new byte[8];
+        System.Buffers.Binary.BinaryPrimitives.WriteUInt64BigEndian(bytes, (ulong)milliseconds);
+        return Prepare(0x0056, 0x0057, bytes, false);
+    }
+    public MiPlayLegacyRuntimeControlCommand PrepareMediaState(bool playing)
+    {
+        var bytes = new byte[4];
+        System.Buffers.Binary.BinaryPrimitives.WriteUInt32BigEndian(bytes, playing ? 2u : 3u);
+        return Prepare(0x005e, 0x005f, bytes, false);
+    }
+
     public MiPlayLegacyRuntimeControlCommand PreparePause() =>
         Prepare(
             MiPlayProtocolConstants.PauseCommand,
@@ -70,9 +92,13 @@ internal sealed class MiPlayLegacyRuntimeControlSequence(
     {
         ArgumentNullException.ThrowIfNull(command);
         ArgumentNullException.ThrowIfNull(acknowledgement);
-        return acknowledgement.Command == command.AcknowledgementCommand &&
-            acknowledgement.Sequence == command.Sequence &&
-            acknowledgement.Payload.AsSpan().SequenceEqual(command.Payload);
+        if (acknowledgement.Command != command.AcknowledgementCommand ||
+            acknowledgement.Sequence != command.Sequence) return false;
+        if (command.Command == MiPlayProtocolConstants.SetVolumeCommand)
+            return MiPlaySetVolumePayloadCodec.TryDecode(command.Payload, out var requested) &&
+                MiPlaySetVolumePayloadCodec.TryDecodeAcknowledgement(acknowledgement.Payload, out var actual) &&
+                requested == actual;
+        return acknowledgement.Payload.AsSpan().SequenceEqual(command.Payload);
     }
 
     private MiPlayLegacyRuntimeControlCommand Prepare(

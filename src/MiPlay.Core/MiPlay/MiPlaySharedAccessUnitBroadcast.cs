@@ -70,7 +70,8 @@ internal sealed class MiPlaySharedAccessUnitBroadcast
     public async Task<IReadOnlyList<MiPlaySharedIndexedAccessUnit>> SnapshotHistoryAsync(
         AudioChannelRoute route,
         int count,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        Func<long>? lastCompletedIndex = null)
     {
         if (!Enum.IsDefined(route))
         {
@@ -87,9 +88,11 @@ internal sealed class MiPlaySharedAccessUnitBroadcast
             lock (gate)
             {
                 ThrowIfFailed();
-                if (history.Count >= count)
+                var maximumIndex = lastCompletedIndex?.Invoke() ?? long.MaxValue;
+                var eligible = history.Where(frame => frame.AccessUnitIndex <= maximumIndex).ToArray();
+                if (eligible.Length >= count)
                 {
-                    return history
+                    return eligible
                         .TakeLast(count)
                         .Select(frame => new MiPlaySharedIndexedAccessUnit(
                             frame.AccessUnitIndex,

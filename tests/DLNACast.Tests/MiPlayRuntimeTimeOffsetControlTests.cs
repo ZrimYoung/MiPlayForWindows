@@ -5,6 +5,28 @@ namespace DLNACast.Tests;
 public sealed class MiPlayRuntimeTimeOffsetControlTests
 {
     [Fact]
+    public async Task LiveDelayIsAbsoluteAndSurvivesRecoveryWithoutChangingGroupClock()
+    {
+        var control = new MiPlayRuntimeTimeOffsetControl(false, initialPlaybackDelayMicroseconds: 1_000_000);
+        ulong offset = 100_000_000;
+        async Task Apply(Task pending, ulong expected)
+        {
+            Assert.True(control.TryRead(out var request)); Assert.True(request.TryStart());
+            offset = control.Resolve(request, offset);
+            Assert.Equal(expected, offset);
+            request.Succeed(); await pending;
+        }
+        await Apply(control.SetPlaybackDelayAsync(1_200_000, CancellationToken.None), 100_200_000);
+        await Apply(control.SetPlaybackDelayAsync(300_000, CancellationToken.None), 99_300_000);
+        // Transport recovery replaces the base clock, preserving the -700 ms target.
+        await Apply(control.UpdateAsync(110_000_000, CancellationToken.None), 109_300_000);
+        await Apply(control.SetPlaybackDelayAsync(1_000_000, CancellationToken.None), 110_000_000);
+        await Apply(control.SetPlaybackDelayAsync(0, CancellationToken.None), 109_000_000);
+        await Apply(control.SetPlaybackDelayAsync(2_000_000, CancellationToken.None), 111_000_000);
+        await Assert.ThrowsAsync<ArgumentOutOfRangeException>(() => control.SetPlaybackDelayAsync(2_000_001, CancellationToken.None));
+    }
+
+    [Fact]
     public async Task CompletesOnlyAfterTheRtspOwnerAcknowledgesTheRequest()
     {
         var control = new MiPlayRuntimeTimeOffsetControl();

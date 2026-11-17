@@ -37,7 +37,7 @@ public sealed class MiPlayFfmpegAacEncoder : DLNACast.Core.Abstractions.IAacEnco
         int outputBitRate = OutputBitRate,
         string codecName = "aac")
     {
-        if (outputBitRate is < 64_000 or > 320_000)
+        if (outputBitRate is < 64_000 or > 512_000)
         {
             throw new ArgumentOutOfRangeException(nameof(outputBitRate));
         }

@@ -19,16 +19,47 @@ internal sealed class MiPlayRuntimeTimeOffsetControl
                 AllowSynchronousContinuations = false,
             });
 
-    public MiPlayRuntimeTimeOffsetControl(bool waitForAcknowledgement = true) =>
+    private readonly int initialPlaybackDelayMicroseconds;
+    private int playbackDelayMicroseconds;
+    private ulong? baseTimeOffset;
+
+    public MiPlayRuntimeTimeOffsetControl(bool waitForAcknowledgement = true, int initialPlaybackDelayMicroseconds = 1_000_000)
+    {
+        ValidateDelay(initialPlaybackDelayMicroseconds);
         WaitForAcknowledgement = waitForAcknowledgement;
+        this.initialPlaybackDelayMicroseconds = playbackDelayMicroseconds = initialPlaybackDelayMicroseconds;
+    }
+
+    private static void ValidateDelay(int value)
+    {
+        if (value is < 0 or > 2_000_000) throw new ArgumentOutOfRangeException(nameof(value));
+    }
+
+    // Only the RTSP owner resolves requests. Keep the original group clock separate
+    // from the user's adjustment so recovery/resume cannot overwrite or compound it.
+    internal ulong Resolve(MiPlayRuntimeTimeOffsetRequest request, ulong currentTimeOffset)
+    {
+        baseTimeOffset ??= currentTimeOffset;
+        if (request.PlaybackDelayMicroseconds is int delay) playbackDelayMicroseconds = delay;
+        else baseTimeOffset = request.TimeOffsetMicroseconds;
+        var delta = (long)playbackDelayMicroseconds - initialPlaybackDelayMicroseconds;
+        return delta >= 0 ? checked(baseTimeOffset.Value + (ulong)delta)
+            : checked(baseTimeOffset.Value - (ulong)-delta);
+    }
+
+    public Task SetPlaybackDelayAsync(int microseconds, CancellationToken token)
+    {
+        ValidateDelay(microseconds);
+        return EnqueueAsync(new MiPlayRuntimeTimeOffsetRequest(0, microseconds), token);
+    }
 
     public bool WaitForAcknowledgement { get; }
 
-    public async Task UpdateAsync(
-        ulong timeOffsetMicroseconds,
-        CancellationToken cancellationToken)
+    public Task UpdateAsync(ulong timeOffsetMicroseconds, CancellationToken cancellationToken) =>
+        EnqueueAsync(new MiPlayRuntimeTimeOffsetRequest(timeOffsetMicroseconds), cancellationToken);
+
+    private async Task EnqueueAsync(MiPlayRuntimeTimeOffsetRequest request, CancellationToken cancellationToken)
     {
-        var request = new MiPlayRuntimeTimeOffsetRequest(timeOffsetMicroseconds);
         await requests.Writer.WriteAsync(request, cancellationToken).ConfigureAwait(false);
         using var cancellationRegistration = cancellationToken.Register(
             static state => ((MiPlayRuntimeTimeOffsetRequest)state!).CancelIfPending(),
@@ -68,13 +99,14 @@ internal sealed class MiPlayRuntimeTimeOffsetControl
     }
 }
 
-internal sealed class MiPlayRuntimeTimeOffsetRequest(ulong timeOffsetMicroseconds)
+internal sealed class MiPlayRuntimeTimeOffsetRequest(ulong timeOffsetMicroseconds, int? playbackDelayMicroseconds = null)
 {
     private readonly TaskCompletionSource completion =
         new(TaskCreationOptions.RunContinuationsAsynchronously);
     private int state;
 
     public ulong TimeOffsetMicroseconds { get; } = timeOffsetMicroseconds;
+    public int? PlaybackDelayMicroseconds { get; } = playbackDelayMicroseconds;
     public Task Completion => completion.Task;
 
     public bool TryStart() => Interlocked.CompareExchange(ref state, 1, 0) == 0;

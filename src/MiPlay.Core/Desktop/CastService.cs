@@ -17,10 +17,16 @@ public sealed class CastService : IAsyncDisposable
     private Task? run;
     private ICastSession? active;
     private int? desiredVolume;
+    private int desiredDelayMilliseconds = 1000;
+    private string? volumeWarning;
+    private int volumeWrites;
     private bool disposed;
     public CastStatus Status { get; private set; } = new(DesktopCastState.Idle, "选择音箱后开始投放");
     public event EventHandler<CastStatus>? StatusChanged;
+    public event EventHandler<int>? ReceiverVolumeObserved;
+    public event EventHandler<SpeakerIdentity>? ReceiverIdentityObserved;
     public int? ReceiverVolume => active?.ReceiverVolume;
+    public bool HasUnconfirmedVolume => volumeWarning is not null;
 
     public CastService(IDesktopAudioPlatform platform, ISpeakerDiscovery discovery,
         Func<ICastSession>? sessionFactory = null, Func<string>? encoderPath = null, TimeSpan? retryDelay = null)
@@ -33,8 +39,9 @@ public sealed class CastService : IAsyncDisposable
         platform.Suspending += OnSuspending;
     }
 
-    public async Task StartAsync(Speaker speaker, CancellationToken token = default, int delayMilliseconds = 1000)
+    public async Task StartAsync(Speaker speaker, CancellationToken token = default, int delayMilliseconds = 1000, int audioBitRate = MiPlayProtocolConstants.AacBitRate)
     {
+        MiPlayAudioQuality.Validate(audioBitRate);
         if (delayMilliseconds is < 0 or > 2000) throw new ArgumentOutOfRangeException(nameof(delayMilliseconds));
         var ready = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         await gate.WaitAsync(token).ConfigureAwait(false);
@@ -44,7 +51,8 @@ public sealed class CastService : IAsyncDisposable
             if (run is { IsCompleted: false }) throw new InvalidOperationException("请先停止当前投放。");
             lifetime?.Dispose();
             lifetime = CancellationTokenSource.CreateLinkedTokenSource(token);
-            run = RunAsync(speaker, ready, lifetime.Token, delayMilliseconds);
+            desiredDelayMilliseconds = delayMilliseconds;
+            run = RunAsync(speaker, ready, lifetime.Token, audioBitRate);
         }
         finally { gate.Release(); }
         await ready.Task.ConfigureAwait(false);
@@ -70,12 +78,40 @@ public sealed class CastService : IAsyncDisposable
         desiredVolume = Math.Clamp(volume, 0, 100);
         var session = active;
         if (session is null || Status.State != DesktopCastState.Casting) return;
-        await session.SetVolumeAsync(Math.Clamp(volume, 0, 100), token).ConfigureAwait(false);
+        await ApplyVolumeAsync(session, Math.Clamp(volume, 0, 100), token).ConfigureAwait(false);
     }
 
-    private async Task RunAsync(Speaker selected, TaskCompletionSource ready, CancellationToken token, int delayMilliseconds)
+    public async Task SetDelayAsync(int milliseconds, CancellationToken token = default)
+    {
+        if (milliseconds is < 0 or > 2000) throw new ArgumentOutOfRangeException(nameof(milliseconds));
+        Volatile.Write(ref desiredDelayMilliseconds, milliseconds);
+        var session = active;
+        if (session is not null && Status.State == DesktopCastState.Casting)
+            await session.SetDelayAsync(milliseconds, token).ConfigureAwait(false);
+    }
+
+    private async Task ApplyVolumeAsync(ICastSession session, int volume, CancellationToken token)
+    {
+        Interlocked.Increment(ref volumeWrites);
+        try
+        {
+            await session.SetVolumeAsync(volume, token).ConfigureAwait(false);
+            volumeWarning = null;
+        }
+        catch (MiPlayVolumeAcknowledgementTimeoutException)
+        {
+            volumeWarning = "正在投放，音量调整未获确认，可稍后重试";
+        }
+        finally { Interlocked.Decrement(ref volumeWrites); }
+        if (Status.State == DesktopCastState.Casting)
+            Publish(Status with { Message = volumeWarning ?? "正在投放",
+                Failure = volumeWarning is null ? DesktopFailure.None : DesktopFailure.VolumeControl });
+    }
+
+    private async Task RunAsync(Speaker selected, TaskCompletionSource ready, CancellationToken token, int audioBitRate)
     {
         var everStreamed = false;
+        volumeWarning = null;
         try
         {
             var path = encoderPath();
@@ -105,8 +141,9 @@ public sealed class CastService : IAsyncDisposable
                             ended.TrySetResult(diagnostic);
                         else if (diagnostic.State == MiPlayCastState.Streaming && !token.IsCancellationRequested)
                             Publish(new(DesktopCastState.Casting,
-                                diagnostic.ContainsAudiblePcm == false ? "正在投放，当前没有声音输入" : $"正在投放到 {selected.Name}",
-                                diagnostic.ContainsAudiblePcm == false ? DesktopFailure.NoInput : DesktopFailure.None, diagnostic));
+                                volumeWarning ?? (diagnostic.ContainsAudiblePcm == false ? "正在投放，当前没有声音输入" : $"正在投放到 {selected.Name}"),
+                                volumeWarning is not null ? DesktopFailure.VolumeControl :
+                                    diagnostic.ContainsAudiblePcm == false ? DesktopFailure.NoInput : DesktopFailure.None, diagnostic));
                     }
                     session.DiagnosticsChanged += OnDiagnostics;
                     Task? monitor = null;
@@ -116,12 +153,13 @@ public sealed class CastService : IAsyncDisposable
                         var output = platform.GetDefaultOutputDevice();
                         attempt.CancelAfter(TimeSpan.FromSeconds(30));
                         await session.StartAsync(new(selected.Renderer,
-                            new CaptureSelection.SystemMix(output.Id, output.DisplayName), path, PlaybackDelayMicroseconds: delayMilliseconds * 1000), attempt.Token).ConfigureAwait(false);
+                            new CaptureSelection.SystemMix(output.Id, output.DisplayName), path, PlaybackDelayMicroseconds: Volatile.Read(ref desiredDelayMilliseconds) * 1000, AudioBitRate: audioBitRate), attempt.Token).ConfigureAwait(false);
                         attempt.CancelAfter(Timeout.InfiniteTimeSpan);
                         token.ThrowIfCancellationRequested();
-                        if (desiredVolume is { } savedVolume) await session.SetVolumeAsync(savedVolume, token).ConfigureAwait(false);
                         everStreamed = true;
-                        Publish(new(DesktopCastState.Casting, $"正在投放到 {selected.Name}", Diagnostics: session.Diagnostics));
+                        if (desiredVolume is { } savedVolume) await ApplyVolumeAsync(session, savedVolume, token).ConfigureAwait(false);
+                        Publish(new(DesktopCastState.Casting, volumeWarning ?? $"正在投放到 {selected.Name}",
+                            volumeWarning is null ? DesktopFailure.None : DesktopFailure.VolumeControl, session.Diagnostics));
                         ready.TrySetResult();
                         monitor = MonitorDefaultOutputAsync(session, output.Id, attempt.Token);
                         var winner = await Task.WhenAny(ended.Task, monitor).ConfigureAwait(false);
@@ -164,9 +202,28 @@ public sealed class CastService : IAsyncDisposable
 
     private async Task MonitorDefaultOutputAsync(ICastSession session, string previous, CancellationToken token)
     {
+        int? lastVolume = null;
+        SpeakerIdentity? lastIdentity = null;
         using var timer = new PeriodicTimer(TimeSpan.FromSeconds(1));
         while (await timer.WaitForNextTickAsync(token).ConfigureAwait(false))
         {
+            if (Volatile.Read(ref volumeWrites) == 0 && session.ReceiverVolume is >= 0 and <= 100 && session.ReceiverVolume != lastVolume)
+            {
+                var resolvedWarning = volumeWarning is not null && (session.ReceiverVolume == desiredVolume || lastVolume is not null);
+                lastVolume = session.ReceiverVolume;
+                desiredVolume = lastVolume;
+                if (resolvedWarning)
+                {
+                    volumeWarning = null;
+                    Publish(Status with { Message = "正在投放", Failure = DesktopFailure.None });
+                }
+                ReceiverVolumeObserved?.Invoke(this, lastVolume!.Value);
+            }
+            if (session.ReceiverIdentity is { } identity && identity != lastIdentity)
+            {
+                lastIdentity = identity;
+                ReceiverIdentityObserved?.Invoke(this, identity);
+            }
             AudioSourceItem output;
             try { output = platform.GetDefaultOutputDevice(); }
             catch (Exception ex) { throw new AudioCaptureException("无法读取系统输出设备。", ex); }
@@ -180,6 +237,7 @@ public sealed class CastService : IAsyncDisposable
 
     public static DesktopFailure ClassifyFailure(Exception exception, MiPlayCastDiagnostics? diagnostic = null)
     {
+        if (exception is MiPlayBootstrapClosedException) return DesktopFailure.Compatibility;
         if (diagnostic?.FailureKind == MiPlayCastFailureKind.ReceiverBusy) return DesktopFailure.Busy;
         if (diagnostic?.FailureKind == MiPlayCastFailureKind.CaptureFailed) return DesktopFailure.Capture;
         if (exception is UnauthorizedAccessException) return DesktopFailure.Permission;
@@ -199,6 +257,7 @@ public sealed class CastService : IAsyncDisposable
         DesktopFailure.Permission => "未获得系统音频录制权限，请在系统设置中允许后重试。",
         DesktopFailure.Offline => "音箱连接中断或超时，请检查电脑和音箱的网络后重新开始。",
         DesktopFailure.Busy => "音箱正被其他设备使用，请结束其他投放后重试。",
+        DesktopFailure.Compatibility => "接收端在初始化握手时关闭了连接，尚未开始发送音频。当前连接方式可能不兼容。",
         DesktopFailure.Authentication => "音箱使用了当前版本尚未支持的认证流程，请导出诊断记录。",
         DesktopFailure.Encoder => "音频编码器缺失或运行失败，请检查测试包是否完整。",
         DesktopFailure.Capture => exception.Message,

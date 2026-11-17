@@ -35,7 +35,7 @@ internal sealed class MiPlaySharedMediaCoordinator
 
     public MiPlaySharedMediaCoordinator(int participantCount)
     {
-        if (participantCount is < 2 or > 63)
+        if (participantCount is < 1 or > 63)
         {
             throw new ArgumentOutOfRangeException(nameof(participantCount));
         }

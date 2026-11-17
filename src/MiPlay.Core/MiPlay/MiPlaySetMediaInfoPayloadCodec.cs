@@ -1,4 +1,5 @@
 using System.Text.Json;
+using System.Text;
 
 namespace DLNACast.Core.MiPlay;
 
@@ -13,7 +14,9 @@ public sealed record MiPlaySetMediaInfoPayload(
     int Volume,
     string Art,
     string SourceName,
-    int DeviceState);
+    int DeviceState,
+    long? PositionMilliseconds = null,
+    string? Lyrics = null);
 
 /// <summary>
 /// Deterministic JSON codec for legacy Cmd_SetMediaInfo (0x0012). The field
@@ -58,6 +61,10 @@ public static class MiPlaySetMediaInfoPayloadCodec
             writer.WriteString("mArt", payload.Art);
             writer.WriteString("mSourceName", payload.SourceName);
             writer.WriteNumber("mDeviceState", payload.DeviceState);
+            if (payload.PositionMilliseconds is { } position) writer.WriteNumber("mPosition", position);
+            // Official sender encodes UTF-8 lyrics as standard Base64. Empty is
+            // explicit clearing; null preserves the historical wire shape.
+            if (payload.Lyrics is { } lyrics) writer.WriteString("mLrc", Convert.ToBase64String(Encoding.UTF8.GetBytes(lyrics)));
             writer.WriteEndObject();
         }
         return buffer.ToArray();
@@ -73,7 +80,7 @@ public static class MiPlaySetMediaInfoPayloadCodec
             using var document = JsonDocument.Parse(payload.ToArray());
             var root = document.RootElement;
             if (root.ValueKind != JsonValueKind.Object ||
-                root.EnumerateObject().Count() != 11 ||
+                root.EnumerateObject().Count() != 11 + (root.TryGetProperty("mPosition", out _) ? 1 : 0) + (root.TryGetProperty("mLrc", out _) ? 1 : 0) ||
                 !TryReadString(root, "mArtist", out var artist) ||
                 !TryReadString(root, "mAlbum", out var album) ||
                 !TryReadString(root, "mTitle", out var title) ||
@@ -89,6 +96,18 @@ public static class MiPlaySetMediaInfoPayloadCodec
                 return false;
             }
 
+            long? parsedPosition = null;
+            string? parsedLyrics = null;
+            if (root.TryGetProperty("mLrc", out var lrc))
+            {
+                if (lrc.ValueKind != JsonValueKind.String || lrc.GetString() is not { } encoded || encoded.Length > 21848) return false;
+                parsedLyrics = new UTF8Encoding(false, true).GetString(Convert.FromBase64String(encoded));
+            }
+            if (root.TryGetProperty("mPosition", out var position))
+            {
+                if (position.ValueKind != JsonValueKind.Number || !position.TryGetInt64(out var value)) return false;
+                parsedPosition = value;
+            }
             var decoded = new MiPlaySetMediaInfoPayload(
                 artist,
                 album,
@@ -100,13 +119,13 @@ public static class MiPlaySetMediaInfoPayloadCodec
                 volume,
                 art,
                 sourceName,
-                deviceState);
+                deviceState, parsedPosition, parsedLyrics);
             Validate(decoded);
             mediaInfo = decoded;
             return true;
         }
         catch (Exception exception) when (
-            exception is JsonException or InvalidOperationException or ArgumentOutOfRangeException or ArgumentException)
+            exception is JsonException or InvalidOperationException or ArgumentException or FormatException)
         {
             return false;
         }
@@ -141,6 +160,9 @@ public static class MiPlaySetMediaInfoPayloadCodec
         ArgumentNullException.ThrowIfNull(payload.CoverUrl);
         ArgumentNullException.ThrowIfNull(payload.Art);
         ArgumentException.ThrowIfNullOrWhiteSpace(payload.SourceName);
+        if (payload.Lyrics is { } lyrics && (Encoding.UTF8.GetByteCount(lyrics) > 16 * 1024 || lyrics.Contains('\0')))
+            throw new ArgumentException("Invalid lyrics.", nameof(payload));
+        if (payload.PositionMilliseconds is < 0 or > int.MaxValue) throw new ArgumentOutOfRangeException(nameof(payload.PositionMilliseconds));
         if (payload.DurationMilliseconds < 0)
         {
             throw new ArgumentOutOfRangeException(nameof(payload.DurationMilliseconds));

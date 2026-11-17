@@ -53,8 +53,10 @@ public sealed class WindowTests
                 first.Expanded = true;
                 first.Volume = 38;
                 first.Delay = 200;
-                first.ApplyDelayCommand.Execute(null);
-                await Task.Delay(250);
+
+                await WaitFor(() => controller.Snapshot.Speakers[0].DelayMilliseconds == 200);
+                await WaitFor(() => controller.Snapshot.Speakers[0].Volume == 38);
+                Assert.False(vm.HasError);
                 Dispatcher.UIThread.RunJobs();
                 Assert.Equal(2, window.GetVisualDescendants().OfType<CheckBox>().Count(c => c.IsChecked == true));
                 Assert.True(vm.StopCommand.CanExecute(null));
@@ -66,8 +68,14 @@ public sealed class WindowTests
                     Assert.NotNull(bitmap);
                     bitmap.Save(screenshot, new Avalonia.Media.Imaging.PngBitmapEncoderOptions());
                 }
-                await vm.StopAsync();
+                var quality = Assert.Single(window.GetVisualDescendants().OfType<ComboBox>());
+                quality.SelectedIndex = 2;
+                await WaitFor(() => controller.Snapshot.AudioBitRate == 512000);
                 await WaitFor(() => vm.Speakers.All(s => !s.Selected));
+                Assert.True(vm.SynchronizedPlayback);
+                vm.SynchronizedPlayback = false;
+                await WaitFor(() => vm.Speakers.All(s => !s.Selected));
+                await WaitFor(() => !controller.Snapshot.SynchronizedPlayback);
                 Assert.False(vm.StopCommand.CanExecute(null));
                 Assert.Equal(200, controller.Snapshot.Speakers[0].DelayMilliseconds);
                 Assert.Equal(38, controller.Snapshot.Speakers[0].Volume);
@@ -113,6 +121,7 @@ public sealed class WindowTests
         }
         public Task StopAsync() => Task.CompletedTask;
         public Task SetVolumeAsync(int volume, CancellationToken token) => Task.CompletedTask;
+        public Task SetDelayAsync(int milliseconds, CancellationToken token) => Task.CompletedTask;
         public Task SetCaptureAsync(CaptureSelection selection, CancellationToken token) => Task.CompletedTask;
         public ValueTask DisposeAsync() { Disposed = true; return ValueTask.CompletedTask; }
     }

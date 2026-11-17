@@ -1,6 +1,7 @@
 using System.Net;
 using System.Net.NetworkInformation;
 using System.Net.Sockets;
+using System.Collections.Concurrent;
 using DLNACast.Core.MiPlay;
 using DLNACast.Core.Models;
 
@@ -8,6 +9,20 @@ namespace MiPlay.Desktop.Services;
 
 public sealed class SpeakerDiscovery : ISpeakerDiscovery
 {
+    private readonly ConcurrentDictionary<string, IdentityEntry> identities = new(StringComparer.OrdinalIgnoreCase);
+    private readonly ConcurrentDictionary<string, byte> invalidated = new(StringComparer.OrdinalIgnoreCase);
+    internal void InvalidateIdentity(string id) => invalidated[id] = 0;
+    internal Func<string, bool> CanReadIdentity { get; set; } = _ => true;
+    internal Func<IPAddress, CancellationToken, Task<SpeakerIdentity?>> ReadIdentity { get; set; } =
+        (address, token) => new SpeakerIdentityReader().ReadAsync(address, token);
+    internal Func<DateTimeOffset> Now { get; set; } = () => DateTimeOffset.UtcNow;
+
+    internal void ObserveIdentity(string id, SpeakerIdentity identity)
+    {
+        var entry = identities.GetOrAdd(id, _ => new());
+        lock (entry) { entry.Revision++; entry.Identity = identity; }
+    }
+
     public async Task<IReadOnlyList<Speaker>> SearchAsync(CancellationToken cancellationToken)
     {
         var addresses = NetworkInterface.GetAllNetworkInterfaces()
@@ -18,8 +33,50 @@ public sealed class SpeakerDiscovery : ISpeakerDiscovery
             .Where(a => a.AddressFamily == AddressFamily.InterNetwork && !IPAddress.IsLoopback(a))
             .Distinct().ToArray();
         var results = await Task.WhenAll(addresses.Select(a => SearchInterfaceAsync(a, cancellationToken))).ConfigureAwait(false);
-        return results.SelectMany(r => r).Select(FromAdvertisement).OfType<Speaker>()
-            .DistinctBy(s => s.Id, StringComparer.OrdinalIgnoreCase).OrderBy(s => s.Name).ToArray();
+        var speakers = results.SelectMany(r => r).Select(FromAdvertisement).OfType<Speaker>()
+            .DistinctBy(s => s.Id, StringComparer.OrdinalIgnoreCase).ToArray();
+        return (await Task.WhenAll(speakers.Select(s => EnrichAsync(s, cancellationToken))).ConfigureAwait(false))
+            .OrderBy(s => s.Name).ToArray();
+    }
+
+    internal async Task<Speaker> EnrichAsync(Speaker speaker, CancellationToken token)
+    {
+        var entry = identities.GetOrAdd(speaker.Id, _ => new());
+        await entry.Gate.WaitAsync(token).ConfigureAwait(false);
+        try
+        {
+            if (CanReadIdentity(speaker.Id) && (invalidated.TryRemove(speaker.Id, out _) ||
+                entry.Address != speaker.Renderer.Address.ToString() || Now() >= entry.RetryAt))
+            {
+                entry.Address = speaker.Renderer.Address.ToString();
+                entry.RetryAt = Now().AddSeconds(60);
+                long revision; lock (entry) revision = entry.Revision;
+                try
+                {
+                    var result = await ReadIdentity(speaker.Renderer.Address, token).ConfigureAwait(false);
+                    lock (entry) if (entry.Revision == revision && result is not null) entry.Identity = result;
+                }
+                catch (OperationCanceledException) when (!token.IsCancellationRequested) { }
+                catch (IOException) { }
+                catch (SocketException) { }
+            }
+            SpeakerIdentity? identity; lock (entry) identity = entry.Identity;
+            if (identity is null) return speaker;
+            var name = string.IsNullOrWhiteSpace(identity.Name) ? speaker.Name : identity.Name;
+            var model = string.IsNullOrWhiteSpace(identity.Model) ? speaker.Model : identity.Model;
+            return speaker with { Name = name, Model = model, Identity = identity,
+                Renderer = speaker.Renderer with { FriendlyName = name, ModelName = model } };
+        }
+        finally { entry.Gate.Release(); }
+    }
+
+    private sealed class IdentityEntry
+    {
+        internal readonly SemaphoreSlim Gate = new(1, 1);
+        internal SpeakerIdentity? Identity;
+        internal string? Address;
+        internal DateTimeOffset RetryAt;
+        internal long Revision;
     }
 
     private static async Task<IReadOnlyList<MiPlayMdnsDevice>> SearchInterfaceAsync(IPAddress address, CancellationToken token)

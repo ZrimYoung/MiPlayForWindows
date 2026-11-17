@@ -14,6 +14,9 @@ internal sealed class MiPlaySharedSendCompletionCoordinator
         new(TaskCreationOptions.RunContinuationsAsynchronously);
     private int nextParticipantId;
     private long nextAccessUnitIndex;
+    private long lastCompletedIndex = -1;
+    private long? sharedMediaStartedAt;
+    private TaskCompletionSource boundaryChanged = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private Exception? failure;
 
     public MiPlaySharedSendCompletionCoordinator(int capacity)
@@ -57,6 +60,8 @@ internal sealed class MiPlaySharedSendCompletionCoordinator
             sendGapMilliseconds,
             mediaStartedAt,
             stopwatchFrequency);
+
+        await WaitForTurnAsync(participant, accessUnitIndex, cancellationToken).ConfigureAwait(false);
 
         Task<MiPlaySharedSendCompletion> waitTask;
         Completion? completion;
@@ -108,6 +113,7 @@ internal sealed class MiPlaySharedSendCompletionCoordinator
             }
             observations.Remove(participant.ParticipantId);
             completion = TryCompleteLocked();
+            SignalBoundaryChangedLocked();
         }
         completion?.Source.TrySetResult(completion.Value);
     }
@@ -123,6 +129,69 @@ internal sealed class MiPlaySharedSendCompletionCoordinator
             }
             failure = exception;
             ready.TrySetException(exception);
+            SignalBoundaryChangedLocked();
+        }
+    }
+
+    // Reading an AAC frame releases the encoder broadcast before the previous
+    // socket write finishes. A newly registered member can therefore read N+1
+    // while the existing sender is still completing N. Wait BEFORE packetizing
+    // or writing, so neither the output PTS clock nor the socket outruns N.
+    public async Task<long?> WaitForTurnAsync(
+        MiPlaySharedSendParticipant participant, long accessUnitIndex, CancellationToken cancellationToken)
+    {
+        while (true)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            Task changed;
+            lock (gate)
+            {
+                ThrowIfFailed();
+                if (!activeParticipants.TryGetValue(participant.ParticipantId, out var start))
+                    throw new OperationCanceledException("The MiPlay receiver has left the shared send group.");
+                if (accessUnitIndex < start)
+                    throw new InvalidOperationException($"The MiPlay receiver joins at access unit {start}, not {accessUnitIndex}.");
+
+                // An old member may leave with an unsent, prefetched frame.
+                // Skip only frames that NO remaining member is responsible for.
+                if (observations.Count == 0 && activeParticipants.Values.All(index => index > nextAccessUnitIndex))
+                {
+                    nextAccessUnitIndex = activeParticipants.Values.Min();
+                    SignalBoundaryChangedLocked();
+                }
+                if (accessUnitIndex == nextAccessUnitIndex) return sharedMediaStartedAt;
+                if (accessUnitIndex < nextAccessUnitIndex || accessUnitIndex != start)
+                    throw new InvalidOperationException(
+                        $"Shared send completion expected access unit {nextAccessUnitIndex}, not {accessUnitIndex}.");
+                changed = boundaryChanged.Task;
+            }
+            await changed.WaitAsync(cancellationToken).ConfigureAwait(false);
+        }
+    }
+
+    private void SignalBoundaryChangedLocked()
+    {
+        var previous = boundaryChanged;
+        boundaryChanged = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        previous.TrySetResult();
+    }
+
+    internal long LastCompletedIndex { get { lock (gate) return lastCompletedIndex; } }
+
+    internal async Task WaitForCompletedFrameAsync(long index, CancellationToken token)
+    {
+        while (true)
+        {
+            Task changed;
+            lock (gate)
+            {
+                ThrowIfFailed();
+                if (lastCompletedIndex >= index) return;
+                if (activeParticipants.Count == 0)
+                    throw new InvalidOperationException("No active sender remains to prepare the late-join history.");
+                changed = boundaryChanged.Task;
+            }
+            await changed.WaitAsync(token).ConfigureAwait(false);
         }
     }
 
@@ -177,7 +246,10 @@ internal sealed class MiPlaySharedSendCompletionCoordinator
         var source = ready;
         ready = new(TaskCreationOptions.RunContinuationsAsynchronously);
         observations.Clear();
+        sharedMediaStartedAt = synchronizedMediaStartedAt;
+        lastCompletedIndex = nextAccessUnitIndex;
         nextAccessUnitIndex++;
+        SignalBoundaryChangedLocked();
         return new Completion(source, value);
     }
 

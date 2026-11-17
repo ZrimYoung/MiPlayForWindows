@@ -157,15 +157,23 @@ public sealed class MiPlaySharedRuntimeControlChannelTests
     }
 
     [Fact]
-    public async Task MissingVolumeAckStillFailsTheCommandAfterThreeSeconds()
+    public async Task MissingVolumeAckFailsOnlyTheRequestAndLateAckCannotConfirmTheNextVolume()
     {
         await using var harness = new Harness();
         var command = new MiPlayLegacyRuntimeControlSequence(0x22).PrepareSetVolume(18);
         var update = harness.Control.ExecuteAsync(command, harness.Token);
         await harness.NextWritten();
-        var failure = await Assert.ThrowsAsync<TimeoutException>(() => update);
+        var failure = await Assert.ThrowsAsync<MiPlayVolumeAcknowledgementTimeoutException>(() => update);
         Assert.Contains("0x000C sequence 0x0022", failure.Message);
-        Assert.Same(failure, await Assert.ThrowsAsync<TimeoutException>(() => harness.Control.Completion));
+        Assert.False(harness.Control.Completion.IsCompleted);
+        var next = new MiPlayLegacyRuntimeControlSequence(0x23).PrepareSetVolume(57);
+        var retried = harness.Control.ExecuteAsync(next, harness.Token);
+        await harness.NextWritten();
+        await harness.Receive(command.AcknowledgementCommand, command.Sequence, command.Payload);
+        Assert.False(retried.IsCompleted);
+        await harness.Receive(next.AcknowledgementCommand, next.Sequence, MiPlayLegacyStatusScalarCodec.Encode(57));
+        await retried;
+        Assert.False(harness.Control.Completion.IsCompleted);
     }
 
     [Fact]

@@ -5,9 +5,10 @@ using MiPlay.Desktop.Services;
 
 namespace MiPlay.Desktop;
 
-public sealed record SpeakerPreferences(string Name = "", string Model = "", int? Volume = null, int DelayMilliseconds = 1000);
+public sealed record SpeakerPreferences(string Name = "", string Model = "", int? Volume = null, int DelayMilliseconds = 1000,
+    string GroupId = "", string GroupName = "", string Channel = "");
 public sealed record DesktopSettings(string? LastSpeakerId = null, bool MuteLocalOutput = false,
-    Dictionary<string, SpeakerPreferences>? Speakers = null);
+    Dictionary<string, SpeakerPreferences>? Speakers = null, bool SynchronizedPlayback = true, int AudioBitRate = 256_000);
 
 public sealed class DesktopStore
 {
@@ -50,7 +51,11 @@ public sealed class DesktopStore
                     time = DateTimeOffset.UtcNow, category, message, state = status?.State.ToString(),
                     failure = status?.Failure.ToString(), diagnostic?.AccessUnits, diagnostic?.RtpFrames,
                     diagnostic?.BufferedMilliseconds, diagnostic?.Overruns, diagnostic?.Underruns,
-                    diagnostic?.MaximumMediaSendGapMilliseconds, diagnostic?.MediaTimelineRebases
+                    diagnostic?.MaximumMediaSendGapMilliseconds, diagnostic?.MediaTimelineRebases,
+                    diagnostic?.MinimumEncodedAccessUnitAgeMilliseconds, diagnostic?.MaximumEncodedAccessUnitAgeMilliseconds,
+                    diagnostic?.MaximumInterReceiverSendSkewMilliseconds, diagnostic?.BufferedAccessUnits,
+                    diagnostic?.EncoderPendingInputFrames, diagnostic?.EncoderBufferedAccessUnits,
+                    diagnostic?.PrePlayDiscardedAccessUnits
                 }) + Environment.NewLine);
             }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }

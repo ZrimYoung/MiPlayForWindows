@@ -6,8 +6,8 @@ using DLNACast.Core.Models;
 namespace DLNACast.Core.MiPlay;
 
 /// <summary>
-/// Owns one Windows loopback capture for a multi-receiver MiPlay group. All
-/// receivers share TIME_OFFSET and the RTP media start, while receivers on the
+/// Owns one platform capture for a multi-receiver MiPlay group. All
+/// receivers share a TIME_OFFSET base and the RTP media start, while receivers on the
 /// same channel route share one encoded AAC stream.
 /// </summary>
 public sealed class MiPlaySharedAudioSession : IAsyncDisposable
@@ -27,7 +27,12 @@ public sealed class MiPlaySharedAudioSession : IAsyncDisposable
     private readonly IReadOnlyDictionary<AudioChannelRoute, MiPlaySharedRouteEncoder> routeEncoders;
     private readonly MiPlayCaptureDiscontinuityRecovery captureRecovery =
         new(PcmFrameFormat.MiPlayAac);
-    private readonly CancellationTokenSource lifetime = new();
+    private readonly CancellationTokenSource lifetime;
+    private readonly bool disposeWhenEmpty;
+    private readonly MiPlayEncoderOutputGate? prePlayGate;
+    private int startupReadyArrivals;
+    private int? basePlaybackDelayMicroseconds;
+    private long prePlayDiscardedAccessUnits;
     private readonly Dictionary<int, SubscriberState> subscribers = [];
     private readonly Dictionary<AudioChannelRoute, SortedDictionary<long, MiPlayWfdAudioPacketizerSnapshot>>
         packetizerSnapshots = [];
@@ -46,9 +51,15 @@ public sealed class MiPlaySharedAudioSession : IAsyncDisposable
         int participantCount,
         IReadOnlyDictionary<AudioChannelRoute, MiPlaySharedRouteEncoder> routeEncoders,
         PcmFrameBuffer sourceBuffer,
-        SwitchableAudioCaptureSource capture)
+        SwitchableAudioCaptureSource capture,
+        CancellationTokenSource lifetime,
+        bool drainBeforeMediaReady,
+        bool disposeWhenEmpty)
     {
         startupParticipantCount = participantCount;
+        this.lifetime = lifetime;
+        this.disposeWhenEmpty = disposeWhenEmpty;
+        prePlayGate = drainBeforeMediaReady ? new MiPlayEncoderOutputGate() : null;
         mediaCoordinator = new MiPlaySharedMediaCoordinator(participantCount);
         accessUnitBroadcast = new MiPlaySharedAccessUnitBroadcast(MaximumParticipantCount);
         sendCoordinator = new MiPlaySharedSendCompletionCoordinator(MaximumParticipantCount);
@@ -68,15 +79,21 @@ public sealed class MiPlaySharedAudioSession : IAsyncDisposable
 
     private PcmFrameBuffer SourceBuffer { get; }
     internal SwitchableAudioCaptureSource Capture { get; }
+    internal bool IsAvailable { get { lock (gate) return disposed == 0 && startupFailure is null; } }
+    internal long PrePlayDiscardedAccessUnits => Interlocked.Read(ref prePlayDiscardedAccessUnits);
 
     public static async Task<MiPlaySharedAudioSession> StartAsync(
         IAudioSourceCatalog audioSources,
         CaptureSelection selection,
         string ffmpegPath,
         int participantCount = 2,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        IAacEncoderFactory? encoderFactory = null,
+        bool drainBeforeMediaReady = false,
+        bool disposeWhenEmpty = true,
+        int audioBitRate = MiPlayProtocolConstants.AacBitRate)
     {
-        if (participantCount is < 2 or > 63)
+        if (participantCount is < 1 or > 63)
         {
             throw new ArgumentOutOfRangeException(nameof(participantCount));
         }
@@ -86,7 +103,7 @@ public sealed class MiPlaySharedAudioSession : IAsyncDisposable
             selection,
             Enumerable.Repeat(AudioChannelRoute.Stereo, participantCount).ToArray(),
             ffmpegPath,
-            cancellationToken).ConfigureAwait(false);
+            cancellationToken, encoderFactory, drainBeforeMediaReady, disposeWhenEmpty, audioBitRate).ConfigureAwait(false);
     }
 
     public static async Task<MiPlaySharedAudioSession> StartAsync(
@@ -94,13 +111,18 @@ public sealed class MiPlaySharedAudioSession : IAsyncDisposable
         CaptureSelection selection,
         IReadOnlyList<AudioChannelRoute> participantRoutes,
         string ffmpegPath,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        IAacEncoderFactory? encoderFactory = null,
+        bool drainBeforeMediaReady = false,
+        bool disposeWhenEmpty = true,
+        int audioBitRate = MiPlayProtocolConstants.AacBitRate)
     {
+        MiPlayAudioQuality.Validate(audioBitRate);
         ArgumentNullException.ThrowIfNull(audioSources);
         ArgumentNullException.ThrowIfNull(selection);
         ArgumentNullException.ThrowIfNull(participantRoutes);
         ArgumentException.ThrowIfNullOrWhiteSpace(ffmpegPath);
-        if (participantRoutes.Count is < 2 or > 63)
+        if (participantRoutes.Count is < 1 or > 63)
         {
             throw new ArgumentOutOfRangeException(nameof(participantRoutes));
         }
@@ -114,6 +136,9 @@ public sealed class MiPlaySharedAudioSession : IAsyncDisposable
             PcmFrameFormat.MiPlayAac);
         var capture = new SwitchableAudioCaptureSource(audioSources, selection);
         var routeEncoders = new Dictionary<AudioChannelRoute, MiPlaySharedRouteEncoder>();
+        // Startup cancellation belongs to the joining receiver. Once started,
+        // encoder lifetime belongs to the group, including after its founder leaves.
+        var groupLifetime = new CancellationTokenSource();
         try
         {
             await capture.StartAsync(sourceBuffer, cancellationToken).ConfigureAwait(false);
@@ -126,16 +151,19 @@ public sealed class MiPlaySharedAudioSession : IAsyncDisposable
                     new MiPlaySharedRouteEncoder(
                         route,
                         ffmpegPath,
-                        cancellationToken));
+                        groupLifetime.Token,
+                        encoderFactory, audioBitRate));
             }
+            cancellationToken.ThrowIfCancellationRequested();
             return new MiPlaySharedAudioSession(
                 participantRoutes.Count,
                 routeEncoders,
                 sourceBuffer,
-                capture);
+                capture, groupLifetime, drainBeforeMediaReady, disposeWhenEmpty);
         }
         catch
         {
+            groupLifetime.Cancel();
             foreach (var routeEncoder in routeEncoders.Values)
             {
                 await routeEncoder.DisposeAsync().ConfigureAwait(false);
@@ -143,11 +171,13 @@ public sealed class MiPlaySharedAudioSession : IAsyncDisposable
             await capture.StopAsync().ConfigureAwait(false);
             await capture.DisposeAsync().ConfigureAwait(false);
             await sourceBuffer.DisposeAsync().ConfigureAwait(false);
+            groupLifetime.Dispose();
             throw;
         }
     }
 
-    internal MiPlaySharedAudioSubscription Subscribe(AudioChannelRoute route)
+    internal MiPlaySharedAudioSubscription Subscribe(AudioChannelRoute route,
+        int playbackDelayMicroseconds = MiPlayProtocolConstants.OtherNetworkPlaybackDelayMicroseconds)
     {
         lock (gate)
         {
@@ -166,7 +196,10 @@ public sealed class MiPlaySharedAudioSession : IAsyncDisposable
             {
                 throw new InvalidOperationException($"No shared AAC encoder was configured for {route}.");
             }
-            var isLateJoin = mediaCoordinator.IsMediaReady;
+            // A member joining during the founder's handshake is also a late
+            // joiner. It must not enroll in the founder's fixed-size barriers.
+            var isLateJoin = nextSubscriberId >= startupParticipantCount;
+            basePlaybackDelayMicroseconds ??= playbackDelayMicroseconds;
             MiPlaySharedBroadcastParticipant? accessUnitParticipant = null;
             MiPlaySharedSendParticipant? sendParticipant = null;
             if (!isLateJoin)
@@ -181,7 +214,7 @@ public sealed class MiPlaySharedAudioSession : IAsyncDisposable
                 route,
                 PcmFrameFormat.MiPlayAac,
                 maximumMilliseconds: PcmFrameBuffer.MaximumBufferMilliseconds,
-                preserveFrameSequence: true);
+                preserveFrameSequence: false);
             var state = new SubscriberState(
                 id,
                 route,
@@ -189,9 +222,10 @@ public sealed class MiPlaySharedAudioSession : IAsyncDisposable
                 accessUnitParticipant,
                 sendParticipant,
                 CancellationTokenSource.CreateLinkedTokenSource(lifetime.Token),
-                isLateJoin);
+                isLateJoin,
+                new MiPlayReceiverTiming(basePlaybackDelayMicroseconds.Value, playbackDelayMicroseconds));
             subscribers.Add(id, state);
-            if (!isLateJoin && subscribers.Count == startupParticipantCount)
+            if (!isLateJoin && nextSubscriberId == startupParticipantCount)
             {
                 SourceBuffer.TrimToLatest(1);
                 fanOutTask = Task.Run(() => RunFanOutAsync(lifetime.Token));
@@ -229,6 +263,8 @@ public sealed class MiPlaySharedAudioSession : IAsyncDisposable
             {
                 await explicitCapturePlaybackGate.WaitUntilResumedAsync(cancellationToken)
                     .ConfigureAwait(false);
+                if (Capture.LastFailure is { } failure)
+                    throw new global::MiPlay.Desktop.Services.AudioCaptureException("系统音频采集已中断。", failure);
                 var frame = await SourceBuffer.ReadFrameWithTimingOrSilenceAsync(cancellationToken)
                     .ConfigureAwait(false);
                 // The tablet keeps the encoder input frame count continuous during
@@ -239,7 +275,7 @@ public sealed class MiPlaySharedAudioSession : IAsyncDisposable
                 {
                     activeSubscribers = [.. subscribers.Values];
                 }
-                if (activeSubscribers.Length == 0)
+                if (activeSubscribers.Length == 0 && disposeWhenEmpty)
                 {
                     return;
                 }
@@ -252,10 +288,12 @@ public sealed class MiPlaySharedAudioSession : IAsyncDisposable
                 {
                     try
                     {
-                        await subscriber.PcmBuffer.WritePreservingSequenceAsync(
-                                recovered,
-                                subscriber.Lifetime.Token)
-                            .ConfigureAwait(false);
+                        // This queue feeds per-receiver signal diagnostics only.
+                        // A receiver still handshaking must never block live AAC.
+                        subscriber.PcmBuffer.Write(recovered.Bytes,
+                            recovered.PresentationTimeMicroseconds,
+                            recovered.ReanchorPresentationTimeline,
+                            recovered.CaptureDiscontinuity);
                     }
                     catch (OperationCanceledException) when (subscriber.Lifetime.IsCancellationRequested)
                     {
@@ -302,6 +340,12 @@ public sealed class MiPlaySharedAudioSession : IAsyncDisposable
                 }
                 var presentationTimeMicroseconds = routeAccessUnits.Values
                     .Max(value => value.PresentationTimeMicroseconds);
+                if (prePlayGate is not null &&
+                    routeAccessUnits.Values.Any(value => !prePlayGate.ShouldPublish(value.PresentationTimeMicroseconds)))
+                {
+                    Interlocked.Increment(ref prePlayDiscardedAccessUnits);
+                    continue;
+                }
                 var reanchorPresentationTimeline = routeAccessUnits.Values
                     .Select(value => value.ReanchorPresentationTimeline)
                     .Distinct()
@@ -371,6 +415,12 @@ public sealed class MiPlaySharedAudioSession : IAsyncDisposable
     {
         if (!subscriber.IsLateJoin)
         {
+            lock (gate)
+            {
+                if (++startupReadyArrivals == startupParticipantCount)
+                    prePlayGate?.TryArm(MiPlayWfdMediaClock.ConvertStopwatchTicksToMicroseconds(
+                        Stopwatch.GetTimestamp(), Stopwatch.Frequency));
+            }
             return;
         }
 
@@ -380,10 +430,23 @@ public sealed class MiPlaySharedAudioSession : IAsyncDisposable
         // not fail the already-starting shared group.
         await mediaCoordinator.WaitUntilMediaReadyAsync(cancellationToken)
             .ConfigureAwait(false);
+    }
+
+    private async Task PrepareLateJoinReplayAsync(SubscriberState subscriber, CancellationToken cancellationToken)
+    {
+        // Snapshot only after the receiver finishes its handshake. Capturing
+        // this window before RTSP readiness can leave it older than the retained
+        // output timestamps by the time the first media packet is written.
+        if (!subscriber.IsLateJoin) throw new InvalidOperationException("Only late members need replay.");
+        // A published/prefetched AU may not have a final output timestamp yet.
+        // Replay only completed sends, so it cannot advance the live clock.
+        await sendCoordinator.WaitForCompletedFrameAsync(
+            MiPlaySharedStartupAccessUnitBuffer.LateJoinRequiredAccessUnitCount - 1,
+            cancellationToken).ConfigureAwait(false);
         var replay = await accessUnitBroadcast.SnapshotHistoryAsync(
                 subscriber.Route,
                 MiPlaySharedStartupAccessUnitBuffer.LateJoinRequiredAccessUnitCount,
-                cancellationToken)
+                cancellationToken, () => sendCoordinator.LastCompletedIndex)
             .ConfigureAwait(false);
         lock (gate)
         {
@@ -575,9 +638,9 @@ public sealed class MiPlaySharedAudioSession : IAsyncDisposable
             {
                 if (!openReady.Task.IsCompletedSuccessfully || !mediaCoordinator.IsMediaReady)
                 {
-                    failStartup = subscribers.Count > 0;
+                    failStartup = !subscriber.IsLateJoin;
                 }
-                disposeSession = subscribers.Count == 0;
+                disposeSession = disposeWhenEmpty && subscribers.Count == 0;
             }
         }
         if (subscriber is not null)
@@ -676,15 +739,26 @@ public sealed class MiPlaySharedAudioSession : IAsyncDisposable
             await subscriber.PcmBuffer.DisposeAsync().ConfigureAwait(false);
             subscriber.Lifetime.Dispose();
         }
-        foreach (var routeEncoder in routeEncoders.Values)
+        try
         {
-            await routeEncoder.DisposeAsync().ConfigureAwait(false);
+            // Dispose every encoder even if one already failed. Its failure is
+            // delivered to the runners; it must not leave capture/muting alive.
+            await Task.WhenAll(routeEncoders.Values.Select(async encoder =>
+            {
+                try { await encoder.DisposeAsync().ConfigureAwait(false); }
+                catch { /* already surfaced through the shared pipeline */ }
+            })).ConfigureAwait(false);
         }
-        await Capture.StopAsync().ConfigureAwait(false);
-        await Capture.DisposeAsync().ConfigureAwait(false);
-        await SourceBuffer.DisposeAsync().ConfigureAwait(false);
-        playbackTransitionGate.Dispose();
-        lifetime.Dispose();
+        finally
+        {
+            try { await Capture.DisposeAsync().ConfigureAwait(false); }
+            finally
+            {
+                await SourceBuffer.DisposeAsync().ConfigureAwait(false);
+                playbackTransitionGate.Dispose();
+                lifetime.Dispose();
+            }
+        }
     }
 
     internal sealed class MiPlaySharedAudioSubscription : IAsyncDisposable
@@ -717,6 +791,7 @@ public sealed class MiPlaySharedAudioSession : IAsyncDisposable
         internal int EncoderPendingInputFrames => owner.routeEncoders[state.Route].PendingInputFrames;
         internal int EncoderBufferedAccessUnits => owner.routeEncoders[state.Route].BufferedAccessUnits;
         internal long EncoderInputSilenceFrames => owner.routeEncoders[state.Route].PcmBuffer.Underruns;
+        internal long PrePlayDiscardedAccessUnits => owner.PrePlayDiscardedAccessUnits;
 
         public Task SynchronizeOpenAsync(CancellationToken cancellationToken)
         {
@@ -732,6 +807,9 @@ public sealed class MiPlaySharedAudioSession : IAsyncDisposable
         internal Task PrepareMediaStartupAsync(CancellationToken cancellationToken) =>
             owner.PrepareMediaStartupAsync(state, cancellationToken);
 
+        internal Task PrepareLateJoinReplayAsync(CancellationToken cancellationToken) =>
+            owner.PrepareLateJoinReplayAsync(state, cancellationToken);
+
         internal long StartupAccessUnitIndex => state.ReplayStartAccessUnitIndex ?? 0;
 
         public async Task<ulong> SynchronizeTimeOffsetAsync(
@@ -740,24 +818,25 @@ public sealed class MiPlaySharedAudioSession : IAsyncDisposable
         {
             if (state.IsLateJoin)
             {
-                return owner.timeOffsetState.GetCurrent();
+                return state.Timing.ToReceiver(owner.timeOffsetState.GetCurrent());
             }
 
             var synchronized = await owner.mediaCoordinator.SynchronizeTimeOffsetAsync(
                     state.Id,
-                    candidate,
+                    state.Timing.ToGroup(candidate),
                     cancellationToken)
                 .ConfigureAwait(false);
-            return owner.timeOffsetState.Initialize(synchronized);
+            return state.Timing.ToReceiver(owner.timeOffsetState.Initialize(synchronized));
         }
 
         internal ulong PrepareRuntimeTimeOffsetUpdate(
             MiPlaySharedTimeOffsetUpdateKey key,
-            ulong candidate) => owner.timeOffsetState.PrepareRuntimeUpdate(key, candidate);
+            ulong candidate) => state.Timing.ToReceiver(
+                owner.timeOffsetState.PrepareRuntimeUpdate(key, state.Timing.ToGroup(candidate)));
 
         internal void CommitRuntimeTimeOffsetUpdate(
             MiPlaySharedTimeOffsetUpdateKey key,
-            ulong value) => owner.timeOffsetState.CommitRuntimeUpdate(key, value);
+            ulong value) => owner.timeOffsetState.CommitRuntimeUpdate(key, state.Timing.ToGroup(value));
 
         internal void RegisterPlaybackControl(
             Func<MiPlaySharedPlaybackControlRequest, CancellationToken, Task> enqueue) =>
@@ -788,7 +867,7 @@ public sealed class MiPlaySharedAudioSession : IAsyncDisposable
                 ? Task.FromResult(Stopwatch.GetTimestamp())
                 : owner.mediaCoordinator.SynchronizeMediaAsync(
                     state.Id,
-                    timeOffset,
+                    state.Timing.ToGroup(timeOffset),
                     cancellationToken);
 
         public Task<long> SynchronizeAccessUnitRunwayAsync(
@@ -799,7 +878,7 @@ public sealed class MiPlaySharedAudioSession : IAsyncDisposable
                     state.Id,
                     cancellationToken);
 
-        internal MiPlayOutputTimestamp GetOutputTimestamp(long accessUnitIndex)
+        internal MiPlayOutputTimestamp GetOutputTimestamp(long accessUnitIndex, bool joiningLive = false)
         {
             if (!owner.mediaCoordinator.IsMediaReady)
             {
@@ -808,7 +887,8 @@ public sealed class MiPlaySharedAudioSession : IAsyncDisposable
             return owner.outputTimeline.GetTimestamp(
                 accessUnitIndex,
                 MiPlayWfdMediaClock.ConvertStopwatchTicksToMicroseconds(
-                    Stopwatch.GetTimestamp(), Stopwatch.Frequency));
+                    Stopwatch.GetTimestamp(), Stopwatch.Frequency),
+                allowForwardGap: state.IsLateJoin && joiningLive);
         }
 
         internal uint RecoverOutputAfterSend(long completedAccessUnitIndex, ulong completedMicroseconds) =>
@@ -839,6 +919,11 @@ public sealed class MiPlaySharedAudioSession : IAsyncDisposable
             long nextAccessUnitIndex,
             MiPlayWfdAudioPacketizerSnapshot snapshot) =>
             owner.RecordPacketizerSnapshot(state.Route, nextAccessUnitIndex, snapshot);
+
+        internal Task<long?> WaitForSendTurnAsync(long accessUnitIndex, CancellationToken cancellationToken) =>
+            state.SendParticipant is { } participant
+                ? owner.sendCoordinator.WaitForTurnAsync(participant, accessUnitIndex, cancellationToken)
+                : throw new InvalidOperationException("The receiver has not joined live media.");
 
         public Task<MiPlaySharedSendCompletion> SynchronizeSendCompletionAsync(
             long accessUnitIndex,
@@ -877,7 +962,8 @@ public sealed class MiPlaySharedAudioSession : IAsyncDisposable
         MiPlaySharedBroadcastParticipant? accessUnitParticipant,
         MiPlaySharedSendParticipant? sendParticipant,
         CancellationTokenSource lifetime,
-        bool isLateJoin)
+        bool isLateJoin,
+        MiPlayReceiverTiming timing)
     {
         private readonly Queue<MiPlaySharedIndexedAccessUnit> replay = [];
         public int Id { get; } = id;
@@ -888,6 +974,7 @@ public sealed class MiPlaySharedAudioSession : IAsyncDisposable
         public MiPlaySharedSendParticipant? SendParticipant { get; private set; } = sendParticipant;
         public CancellationTokenSource Lifetime { get; } = lifetime;
         public bool IsLateJoin { get; } = isLateJoin;
+        public MiPlayReceiverTiming Timing { get; } = timing;
         public long? ReplayStartAccessUnitIndex { get; private set; }
         public int ReplayCount => replay.Count;
 

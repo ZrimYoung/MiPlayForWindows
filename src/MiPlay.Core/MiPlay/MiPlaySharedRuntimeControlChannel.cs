@@ -15,6 +15,7 @@ internal sealed class MiPlaySharedRuntimeControlChannel : IAsyncDisposable
     private readonly Func<ReadOnlyMemory<byte>, CancellationToken, Task> writeFrame;
     private readonly Action<string> reportEvidence;
     private readonly Action<MiPlayNotifyPayload>? notificationReceived;
+    private readonly Action<MiPlayCommandFrame>? responseReceived;
     private readonly TimeProvider clock;
     private readonly CancellationTokenSource lifetime;
     private readonly SemaphoreSlim writeGate = new(1, 1);
@@ -31,12 +32,14 @@ internal sealed class MiPlaySharedRuntimeControlChannel : IAsyncDisposable
         Action<string> reportEvidence,
         CancellationToken cancellationToken,
         TimeProvider? clock = null,
-        Action<MiPlayNotifyPayload>? notificationReceived = null)
+        Action<MiPlayNotifyPayload>? notificationReceived = null,
+        Action<MiPlayCommandFrame>? responseReceived = null)
     {
         this.readFrame = readFrame ?? throw new ArgumentNullException(nameof(readFrame));
         this.writeFrame = writeFrame ?? throw new ArgumentNullException(nameof(writeFrame));
         this.reportEvidence = reportEvidence ?? throw new ArgumentNullException(nameof(reportEvidence));
         this.notificationReceived = notificationReceived;
+        this.responseReceived = responseReceived;
         this.clock = clock ?? TimeProvider.System;
         lifetime = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         lastHeartbeatTimestamp = this.clock.GetTimestamp();
@@ -54,8 +57,8 @@ internal sealed class MiPlaySharedRuntimeControlChannel : IAsyncDisposable
             await Completion.ConfigureAwait(false);
         }
 
-        // Only the heartbeat changes completion policy. Volume still requires
-        // an exact command/sequence/payload ACK; Pause/Resume keep their policy.
+        // Volume requires the same command, sequence and decoded value; its
+        // missing ACK is reported to the caller without ending healthy audio.
         PendingAcknowledgement? acknowledgement = null;
         if (command.WaitForAcknowledgement && command.Command != MiPlayProtocolConstants.HeartbeatCommand)
         {
@@ -86,11 +89,20 @@ internal sealed class MiPlaySharedRuntimeControlChannel : IAsyncDisposable
                 }
                 catch (TimeoutException exception)
                 {
+                    if (command.Command == MiPlayProtocolConstants.SetVolumeCommand)
+                        throw new MiPlayVolumeAcknowledgementTimeoutException(command.Sequence, exception);
                     throw new TimeoutException(
                         $"MiPlay command 0x{command.Command:X4} sequence 0x{command.Sequence:X4} was not acknowledged.",
                         exception);
                 }
             }
+        }
+        catch (MiPlayVolumeAcknowledgementTimeoutException) when (
+            !Completion.IsCompleted && !lifetime.IsCancellationRequested && !cancellationToken.IsCancellationRequested)
+        {
+            // Keep the persistent reader, including a partially read late ACK.
+            // The heartbeat watchdog still detects real disconnects.
+            throw;
         }
         catch (Exception exception)
         {
@@ -154,6 +166,7 @@ internal sealed class MiPlaySharedRuntimeControlChannel : IAsyncDisposable
                 continue;
             }
 
+            responseReceived?.Invoke(frame);
             if (frame.Command == MiPlayProtocolConstants.NotifyCommand &&
                 MiPlayNotifyPayloadCodec.TryDecode(
                     frame.Payload,

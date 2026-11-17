@@ -28,6 +28,7 @@ public sealed class MiPlaySystemAudioTransmitter : IAsyncDisposable
     public bool IsActive => diagnostics.State is not (MiPlayCastState.Idle or MiPlayCastState.Error);
     public int? ReceiverVolume =>
         (runner as IMiPlayReceiverVolumeController)?.ReceiverVolume;
+    public MiPlayReceiverIdentity? ReceiverIdentity => (runner as IMiPlayReceiverStateSource)?.ReceiverIdentity;
     public bool ReceiverPaused =>
         (runner as IMiPlayPlaybackController)?.ReceiverPaused ?? false;
     public event EventHandler<MiPlayCastDiagnostics>? DiagnosticsChanged;
@@ -208,6 +209,16 @@ public sealed class MiPlaySystemAudioTransmitter : IAsyncDisposable
         }
 
         await volumeController.SetReceiverVolumeAsync(volume, cancellationToken).ConfigureAwait(false);
+    }
+
+    public Task SetPlaybackDelayAsync(int microseconds, CancellationToken token = default)
+    {
+        if (microseconds is < 0 or > 2_000_000) throw new ArgumentOutOfRangeException(nameof(microseconds));
+        if (diagnostics.State != MiPlayCastState.Streaming)
+            throw new InvalidOperationException("投放尚未就绪。");
+        return runner is IMiPlayPlaybackDelayController control
+            ? control.SetPlaybackDelayAsync(microseconds, token)
+            : Task.FromException(new NotSupportedException("当前会话不支持实时调节延迟。"));
     }
 
     public async Task SetCaptureSelectionAsync(

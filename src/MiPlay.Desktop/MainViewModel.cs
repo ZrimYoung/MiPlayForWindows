@@ -12,6 +12,19 @@ public sealed class MainViewModel : ObservableModel, IAsyncDisposable
 {
     private readonly DesktopController controller;
     private bool disposed, mute;
+    private bool synchronizedPlayback;
+    private int audioQualityIndex;
+    public string[] AudioQualities { get; } = ["256 kbps · 标准", "320 kbps · 高音质", "512 kbps · 实验性"];
+    public int AudioQualityIndex
+    {
+        get => audioQualityIndex;
+        set { if (value is < 0 or > 2 || value == audioQualityIndex) return; audioQualityIndex = value; Notify(); _ = ChangeQualityAsync(value); }
+    }
+    private async Task ChangeQualityAsync(int index)
+    {
+        try { await controller.SetAudioBitRateAsync(new[] {256000, 320000, 512000}[index]); }
+        catch (Exception ex) { ReportError(ex); Apply(controller.Snapshot); }
+    }
     private long revision;
     private string discoveryHint = "正在查找附近音箱…", error = "";
     public MainViewModel(DesktopController controller)
@@ -42,6 +55,16 @@ public sealed class MainViewModel : ObservableModel, IAsyncDisposable
         set { if (mute == value) return; mute = value; Notify(); _ = ChangeMuteAsync(value); }
     }
     public string LocalOutputHint => SupportsLocalMute ? "捕获声音后静音本机，停止全部投放后恢复。" : "Windows 暂不支持静音本机，电脑将同时出声。";
+    public bool SynchronizedPlayback
+    {
+        get => synchronizedPlayback;
+        set { if (synchronizedPlayback == value) return; synchronizedPlayback = value; Notify(); _ = ChangeModeAsync(value); }
+    }
+    private async Task ChangeModeAsync(bool value)
+    {
+        try { await controller.SetSynchronizedPlaybackAsync(value); }
+        catch (Exception ex) { ReportError(ex); synchronizedPlayback = controller.Snapshot.SynchronizedPlayback; Notify(nameof(SynchronizedPlayback)); }
+    }
     private async Task ChangeMuteAsync(bool value)
     {
         try { await controller.SetMutedAsync(value); }
@@ -55,6 +78,7 @@ public sealed class MainViewModel : ObservableModel, IAsyncDisposable
     {
         if (snapshot.Revision < revision) return;
         revision = snapshot.Revision;
+        audioQualityIndex = snapshot.AudioBitRate switch { 320000 => 1, 512000 => 2, _ => 0 }; Notify(nameof(AudioQualityIndex));
         foreach (var card in snapshot.Speakers)
         {
             var vm = Speakers.FirstOrDefault(s => s.Id == card.Id);
@@ -62,6 +86,7 @@ public sealed class MainViewModel : ObservableModel, IAsyncDisposable
             vm.Update(card);
         }
         mute = snapshot.MuteLocalOutput; Notify(nameof(MuteLocalOutput));
+        synchronizedPlayback = snapshot.SynchronizedPlayback; Notify(nameof(SynchronizedPlayback));
         DiscoveryHint = snapshot.DiscoveryMessage;
         Notify(nameof(IsEmpty)); Notify(nameof(StatusText)); StopCommand.Refresh();
     }
@@ -83,12 +108,13 @@ public sealed class SpeakerViewModel : ObservableModel, IAsyncDisposable
     private bool delayDirty, updating;
     private CancellationTokenSource? volumeChange;
     private Task volumeTask = Task.CompletedTask;
+    private Task delayTask = Task.CompletedTask;
+    private bool disposed;
     public SpeakerViewModel(DesktopController controller, SpeakerCard card, Action<Exception> error)
     {
         this.controller = controller; this.card = card; this.error = error;
         volume = card.Volume ?? 30; delay = card.DelayMilliseconds;
         ToggleCommand = new(() => controller.SetSelectedAsync(Id, !Selected), () => card.Online || Selected, error, allowConcurrent: true);
-        ApplyDelayCommand = new(() => controller.SetDelayAsync(Id, (int)Math.Round(delay)), () => true, error);
         FastCommand = new(() => SetPreset(200), () => true, error);
         BalancedCommand = new(() => SetPreset(500), () => true, error);
         StableCommand = new(() => SetPreset(1000), () => true, error);
@@ -96,11 +122,12 @@ public sealed class SpeakerViewModel : ObservableModel, IAsyncDisposable
     }
     public string Id => card.Id;
     public string Name => card.Name;
+    public bool HasGroup => !string.IsNullOrWhiteSpace(card.GroupId);
+    public string GroupLabel => HasGroup ? $"{card.GroupName} · 立体声组合 · {card.Channel switch { "left" => "左声道", "right" => "右声道", _ => "组合成员" }}" : "";
     public bool Selected => card.Selected;
     public string StateText => !card.Online && !Selected ? "离线 · 保留上次设置" : card.State == "Idle" ? "点选加入投放" : card.Message;
     public bool IsError => card.State == "Error";
     public AsyncCommand ToggleCommand { get; }
-    public AsyncCommand ApplyDelayCommand { get; }
     public AsyncCommand FastCommand { get; }
     public AsyncCommand BalancedCommand { get; }
     public AsyncCommand StableCommand { get; }
@@ -125,10 +152,32 @@ public sealed class SpeakerViewModel : ObservableModel, IAsyncDisposable
     public double Delay
     {
         get => delay;
-        set { delay = Math.Round(value / 10) * 10; delayDirty = true; Notify(); Notify(nameof(DelayLabel)); }
+        set
+        {
+            var rounded = Math.Round(value / 10) * 10;
+            if (delay == rounded) return;
+            delay = rounded; delayDirty = true; Notify(); Notify(nameof(DelayLabel));
+            if (delayTask.IsCompleted) delayTask = SendDelayAsync();
+        }
     }
     public string DelayLabel => $"{delay:0} ms";
-    private async Task SetPreset(int value) { Delay = value; await controller.SetDelayAsync(Id, value); }
+    private Task SetPreset(int value) { Delay = value; return delayTask; }
+    private async Task SendDelayAsync()
+    {
+        try
+        {
+            while (!disposed)
+            {
+                await Task.Delay(120);
+                if (disposed) return;
+                var target = (int)delay;
+                if (HasGroup) await controller.SetGroupDelayAsync(card.GroupId!, target);
+                else await controller.SetDelayAsync(Id, target);
+                if ((int)delay == target) return;
+            }
+        }
+        catch (Exception ex) { error(ex); }
+    }
     private async Task SendVolumeAsync(int value, CancellationTokenSource change)
     {
         try { await Task.Delay(180, change.Token); await controller.SetVolumeAsync(Id, value); }
@@ -143,9 +192,10 @@ public sealed class SpeakerViewModel : ObservableModel, IAsyncDisposable
         if (delay == card.DelayMilliseconds) delayDirty = false;
         if (!delayDirty) { delay = card.DelayMilliseconds; Notify(nameof(Delay)); Notify(nameof(DelayLabel)); }
         Notify(nameof(Name)); Notify(nameof(Selected)); Notify(nameof(StateText)); Notify(nameof(IsError)); Notify(nameof(VolumeLabel));
+        Notify(nameof(GroupLabel)); Notify(nameof(HasGroup));
         ToggleCommand.Refresh();
     }
-    public async ValueTask DisposeAsync() { volumeChange?.Cancel(); await volumeTask; }
+    public async ValueTask DisposeAsync() { disposed = true; volumeChange?.Cancel(); await Task.WhenAll(volumeTask, delayTask); }
 }
 
 public abstract class ObservableModel : INotifyPropertyChanged

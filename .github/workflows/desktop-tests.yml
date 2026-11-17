@@ -44,11 +44,14 @@ jobs:
       - name: Native resampler tests
         if: runner.os == 'macOS'
         run: bash native/macos/build.sh artifacts/native --test
+      - name: Native media metadata and artwork tests
+        if: runner.os == 'macOS'
+        run: bash tests/test-mac-media.sh
       - name: Package local test build
         run: python scripts/package-desktop.py ${{ matrix.platform }}
       - name: Native Mac service lifecycle without audio capture
         if: runner.os == 'macOS'
-        run: python tests/smoke-desktop-engine.py "artifacts/desktop/0.4.0/osx-arm64/MiPlay Desktop.app/Contents/MacOS/MiPlay.Engine"
+        run: python tests/smoke-desktop-engine.py "artifacts/desktop/0.5.11/osx-arm64/MiPlay Desktop.app/Contents/MacOS/MiPlay.Engine"
       - uses: actions/upload-artifact@v4
         if: always()
         with:

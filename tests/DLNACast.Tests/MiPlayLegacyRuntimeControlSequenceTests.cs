@@ -5,6 +5,18 @@ namespace DLNACast.Tests;
 public sealed class MiPlayLegacyRuntimeControlSequenceTests
 {
     [Fact]
+    public void Oh2pTaggedVolumeAckStillRequiresTheExpectedValueCommandAndSequence()
+    {
+        var command = new MiPlayLegacyRuntimeControlSequence().PrepareSetVolume(57);
+        var reply = new MiPlayCommandFrame(0x0d, command.Sequence, MiPlayLegacyStatusScalarCodec.Encode(57));
+        Assert.True(MiPlayLegacyRuntimeControlSequence.IsExpectedAcknowledgement(command, reply));
+        Assert.False(MiPlayLegacyRuntimeControlSequence.IsExpectedAcknowledgement(command, reply with { Command = 0x0f }));
+        Assert.False(MiPlayLegacyRuntimeControlSequence.IsExpectedAcknowledgement(command, reply with { Sequence = 99 }));
+        Assert.False(MiPlayLegacyRuntimeControlSequence.IsExpectedAcknowledgement(command,
+            reply with { Payload = MiPlayLegacyStatusScalarCodec.Encode(56) }));
+    }
+
+    [Fact]
     public void InterleavedVolumeAdvancesTheSharedHeartbeatSequence()
     {
         var sequence = new MiPlayLegacyRuntimeControlSequence();

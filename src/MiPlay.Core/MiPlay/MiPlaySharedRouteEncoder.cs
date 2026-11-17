@@ -1,4 +1,5 @@
 using DLNACast.Core.Audio;
+using DLNACast.Core.Abstractions;
 using System.Threading.Channels;
 
 namespace DLNACast.Core.MiPlay;
@@ -10,7 +11,7 @@ namespace DLNACast.Core.MiPlay;
 /// </summary>
 internal sealed class MiPlaySharedRouteEncoder : IAsyncDisposable
 {
-    private readonly MiPlayFfmpegAacEncoder encoder;
+    private readonly IAacEncoder encoder;
     private readonly MiPlayOrderedAccessUnitBuffer accessUnits = new();
     private readonly MiPlayEncoderInputWindow inputWindow = new();
     private readonly Channel<MiPlayEncoderInputTiming> inputTimings =
@@ -28,7 +29,9 @@ internal sealed class MiPlaySharedRouteEncoder : IAsyncDisposable
     public MiPlaySharedRouteEncoder(
         AudioChannelRoute route,
         string ffmpegPath,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        IAacEncoderFactory? encoderFactory = null,
+        int audioBitRate = MiPlayProtocolConstants.AacBitRate)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(ffmpegPath);
         PcmBuffer = new PcmFrameBuffer(
@@ -36,10 +39,8 @@ internal sealed class MiPlaySharedRouteEncoder : IAsyncDisposable
             PcmFrameFormat.MiPlayAac,
             maximumMilliseconds: PcmFrameBuffer.MaximumBufferMilliseconds,
             preserveFrameSequence: true);
-        encoder = MiPlayFfmpegAacEncoder.Start(
-            ffmpegPath,
-            MiPlayProtocolConstants.AacBitRate,
-            "aac_mf");
+        encoder = (encoderFactory ?? new FfmpegAacEncoderFactory("aac_mf"))
+            .Start(ffmpegPath, audioBitRate);
         lifetime = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         writerTask = Task.Run(() => RunWriterAsync(lifetime.Token), lifetime.Token);
         readerTask = Task.Run(() => RunReaderAsync(lifetime.Token), lifetime.Token);

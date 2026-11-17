@@ -13,6 +13,7 @@ import sys
 import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
+VERSION = "0.5.11"
 
 
 def run(*args):
@@ -29,7 +30,7 @@ def main():
     ffmpeg, archive = dependency.prepare(args.platform)
     rid = "osx-arm64" if args.platform == "macos" else "win-x64"
     artifacts = ROOT / "artifacts/desktop"
-    stage = artifacts / "0.4.0" / rid
+    stage = artifacts / VERSION / rid
     if stage.exists():
         shutil.rmtree(stage)
     if args.platform == "macos":
@@ -42,7 +43,7 @@ def main():
         resources = output
     output.mkdir(parents=True)
     publish = [os.environ.get("MIPLAY_DOTNET", "dotnet"), "publish", ("src/MiPlay.Engine/MiPlay.Engine.csproj" if args.platform == "macos" else "src/MiPlay.Desktop/MiPlay.Desktop.csproj"),
-               "-c", "Release", "-r", rid, "--self-contained", "true", "-o", str(output), "-m:1", "-p:UseSharedCompilation=false"]
+               "-c", "Release", "-r", rid, "--self-contained", "true", "-o", str(output), "-m:1", "-p:UseSharedCompilation=false", f"-p:Version={VERSION}"]
     if args.platform == "windows":
         publish.append("-p:DesktopPlatform=Windows")
     else:
@@ -65,6 +66,16 @@ def main():
     else:
         run("bash", "native/macos/build.sh", output)
         run("bash", "native/macos/build-app.sh", output)
+        webp_notices = resources / "third-party/libwebp"
+        webp_notices.mkdir(parents=True)
+        webp_source = ROOT / "artifacts/dependencies/webp/libwebp-1.6.0"
+        for name in ("COPYING", "PATENTS", "AUTHORS"):
+            shutil.copy2(webp_source / name, webp_notices / name)
+        shutil.copy2(ROOT / "scripts/prepare-desktop-webp.py", webp_notices / "build-recipe.py")
+        media_notices = resources / "third-party/mediaremote-adapter"
+        media_notices.mkdir(parents=True)
+        shutil.copy2(ROOT / "native/macos/MediaRemote/vendor/LICENSE", media_notices / "LICENSE")
+        shutil.copy2(ROOT / "native/macos/MediaRemote/README.md", media_notices / "README.md")
         shutil.copy2(ffmpeg, output / "ffmpeg")
         notices = resources / "third-party/ffmpeg"
         notices.mkdir(parents=True)
@@ -74,10 +85,11 @@ def main():
         with (app / "Contents/Info.plist").open("wb") as file:
             plistlib.dump({"CFBundleName": "MiPlay Desktop", "CFBundleDisplayName": "MiPlay Desktop",
                           "CFBundleIdentifier": "com.zrim.miplaydesktop", "CFBundleExecutable": "MiPlay.Desktop",
-                          "CFBundlePackageType": "APPL", "CFBundleShortVersionString": "0.4.0", "CFBundleVersion": "1",
+                          "CFBundlePackageType": "APPL", "CFBundleShortVersionString": VERSION, "CFBundleVersion": "14",
                           "LSMinimumSystemVersion": "14.2", "NSHighResolutionCapable": True, "LSMultipleInstancesProhibited": True,
                           "NSAudioCaptureUsageDescription": "捕获电脑正在播放的声音，并投放到你选择的小米妙播音箱。",
                           "NSLocalNetworkUsageDescription": "查找并连接同一局域网中的小米妙播音箱。",
+                          "NSAppleEventsUsageDescription": "读取音乐应用当前歌曲信息，以获取对应的高清封面及歌词，并投放到所选设备。不会通过此权限操作播放。",
                           "NSBonjourServices": ["_mi-connect._udp"]}, file)
         macho = {b"\xcf\xfa\xed\xfe", b"\xfe\xed\xfa\xcf", b"\xca\xfe\xba\xbe"}
         executable = output / "MiPlay.Desktop"
@@ -100,7 +112,7 @@ def main():
     except (FileNotFoundError, subprocess.CalledProcessError):
         commit, dirty = "unversioned", None
     (resources / "build-info.json").write_text(json.dumps({
-        "source_commit": commit, "working_tree_dirty": dirty, "runtime": rid,
+        "source_commit": commit, "working_tree_dirty": dirty, "runtime": rid, "app_version": VERSION,
         "built_at_utc": datetime.now(timezone.utc).isoformat(),
         "speaker_hardware_validation": "pending", "public_release": False
     }, indent=2), encoding="utf-8")
@@ -110,7 +122,7 @@ def main():
         run("codesign", "--force", "--sign", "-", app)
         run("codesign", "--verify", "--deep", "--strict", app)
         run(executable, "--self-check")
-    destination = artifacts / f"MiPlayDesktop-0.4.0-{rid}.zip"
+    destination = artifacts / f"MiPlayDesktop-{VERSION}-{rid}.zip"
     destination.unlink(missing_ok=True)
     if args.platform == "macos":
         run("ditto", "-c", "-k", "--sequesterRsrc", "--keepParent", app, destination)

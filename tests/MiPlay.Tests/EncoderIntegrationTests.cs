@@ -9,6 +9,10 @@ public sealed class EncoderIntegrationTests
     [FfmpegFact]
     public async Task ActualEncoderProducesDecodableStereoAudioAndReleasesTheChildProcess()
     {
+        foreach (var bitrate in new[] { 256000, 320000, 512000 }) await VerifyBitrateAsync(bitrate);
+    }
+    private static async Task VerifyBitrateAsync(int bitrate)
+    {
         // CI and the documented local check supply the packaged encoder explicitly.
         var path = Environment.GetEnvironmentVariable("MIPLAY_TEST_FFMPEG");
         Assert.False(string.IsNullOrWhiteSpace(path));
@@ -16,7 +20,7 @@ public sealed class EncoderIntegrationTests
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(20));
         int pid;
         byte[] encoded;
-        await using (var encoder = MiPlayFfmpegAacEncoder.Start(path, 256_000, codec))
+        await using (var encoder = MiPlayFfmpegAacEncoder.Start(path, bitrate, codec))
         {
             pid = encoder.ProcessId;
             using var output = new MemoryStream();

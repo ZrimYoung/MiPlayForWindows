@@ -22,6 +22,10 @@
         <TextBlock Text="音乐、视频和浏览器 · 跟随默认输出设备" Foreground="#ABBAC8" FontSize="12" />
         <ToggleSwitch Content="仅音箱播放（实验）" OnContent="已开启" OffContent="已关闭" Foreground="#F0F3F7" IsChecked="{Binding MuteLocalOutput}" IsEnabled="{Binding SupportsLocalMute}" />
         <TextBlock Text="{Binding LocalOutputHint}" Foreground="#ABBAC8" FontSize="11" TextWrapping="Wrap" />
+        <ComboBox ItemsSource="{Binding AudioQualities}" SelectedIndex="{Binding AudioQualityIndex}" HorizontalAlignment="Stretch" />
+        <TextBlock Text="切换音质会停止投放，需重新选择音箱。512 kbps 为实验性，兼容性待验证。" FontSize="11" Foreground="#ABBAC8" TextWrapping="Wrap" />
+        <ToggleSwitch Content="同步投放" IsChecked="{Binding SynchronizedPlayback}" Foreground="#F0F3F7"
+                      ToolTip.Tip="使用共同时间线同步多台音箱；关闭使用兼容模式。切换后需重新选择音箱。" />
       </StackPanel>
     </Border>
     <Grid Grid.Row="2" RowDefinitions="Auto,*" RowSpacing="12">
@@ -36,7 +40,7 @@
                 <StackPanel Spacing="14">
                   <Button Command="{Binding ToggleCommand}" Background="Transparent" BorderThickness="0" Padding="0" HorizontalAlignment="Stretch" HorizontalContentAlignment="Stretch">
                     <Grid ColumnDefinitions="*,Auto" ColumnSpacing="12">
-                      <StackPanel Spacing="5"><TextBlock Text="{Binding Name}" FontSize="18" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" /><TextBlock Text="{Binding StateText}" FontSize="11" Opacity="0.7" TextWrapping="Wrap" /></StackPanel>
+                      <StackPanel Spacing="5"><TextBlock Text="{Binding Name}" FontSize="18" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" /><TextBlock Text="{Binding GroupLabel}" IsVisible="{Binding HasGroup}" FontSize="11" Foreground="#AFC8FF" TextWrapping="Wrap" /><TextBlock Text="{Binding StateText}" FontSize="11" Opacity="0.7" TextWrapping="Wrap" /></StackPanel>
                       <CheckBox Grid.Column="1" IsChecked="{Binding Selected, Mode=OneWay}" IsHitTestVisible="False" Focusable="False" VerticalAlignment="Center" />
                     </Grid>
                   </Button>
@@ -51,8 +55,8 @@
                       <StackPanel Spacing="10" IsVisible="{Binding Expanded}" Margin="0,4,0,0">
                         <Grid ColumnDefinitions="*,Auto"><TextBlock Text="播放延迟" FontSize="12" /><TextBlock Grid.Column="1" Text="{Binding DelayLabel}" FontWeight="SemiBold" /></Grid>
                         <Slider Minimum="0" Maximum="2000" TickFrequency="10" IsSnapToTickEnabled="True" Value="{Binding Delay}" Height="28" />
-                        <StackPanel Orientation="Horizontal" Spacing="6"><Button Content="200 ms" Command="{Binding FastCommand}" Padding="10,6" /><Button Content="500 ms" Command="{Binding BalancedCommand}" Padding="10,6" /><Button Content="1000 ms" Command="{Binding StableCommand}" Padding="10,6" /><Button Content="应用" Command="{Binding ApplyDelayCommand}" Padding="10,6" /></StackPanel>
-                        <TextBlock Text="更低响应更快；卡顿时调高。应用后仅此音箱短暂重连，设置自动记住。数值不代表实测总延迟。" FontSize="11" Opacity="0.7" TextWrapping="Wrap" />
+                        <StackPanel Orientation="Horizontal" Spacing="6"><Button Content="200 ms" Command="{Binding FastCommand}" Padding="10,6" /><Button Content="500 ms" Command="{Binding BalancedCommand}" Padding="10,6" /><Button Content="1000 ms" Command="{Binding StableCommand}" Padding="10,6" /></StackPanel>
+                        <TextBlock Text="拖动即生效，无需重连；立体声组合一起调整。降低过多可能卡顿，设置自动记住。数值不代表实测总延迟。" FontSize="11" Opacity="0.7" TextWrapping="Wrap" />
                       </StackPanel>
                   </StackPanel>
                 </StackPanel>

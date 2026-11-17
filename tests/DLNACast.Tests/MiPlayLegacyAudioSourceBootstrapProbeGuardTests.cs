@@ -6,6 +6,33 @@ namespace DLNACast.Tests;
 
 public sealed class MiPlayLegacyAudioSourceBootstrapProbeGuardTests
 {
+    [Theory]
+    [InlineData("ZrMac Air")]
+    [InlineData("小张的 Mac \"Air\"")]
+    public void ConfiguredSourceNamePreservesStrictBootstrapBoundary(string name)
+    {
+        var session = new MiPlayLegacyAudioSourceSession(name);
+        var guard = new MiPlayLegacyAudioSourceBootstrapProbeGuard(
+            IPAddress.Parse("192.168.10.4"), true, expectedSourceName: name);
+        var writes = ReproduceAllOutboundWrites(session);
+        foreach (var write in writes) Assert.True(guard.AuthorizeNextWrite(write).CanSend);
+        Assert.True(guard.BoundaryReached);
+        Assert.False(guard.AuthorizeNextWrite(writes[^1]).CanSend);
+    }
+
+    [Fact]
+    public void ConfiguredSourceNameDoesNotPermitAnotherName()
+    {
+        var session = MiPlayLegacyAudioSourceSession.CreateCapturedMiPadComparisonSession();
+        var guard = new MiPlayLegacyAudioSourceBootstrapProbeGuard(
+            IPAddress.Parse("192.168.10.4"), true, expectedSourceName: "ZrMac Air");
+        var writes = ReproduceAllOutboundWrites(session);
+        Assert.True(guard.AuthorizeNextWrite(writes[0]).CanSend);
+        Assert.True(guard.AuthorizeNextWrite(writes[1]).CanSend);
+        Assert.False(guard.AuthorizeNextWrite(writes[2]).CanSend);
+        Assert.False(guard.AuthorizeNextWrite(writes[3]).CanSend);
+    }
+
     [Fact]
     public void ExplicitGuardAllowsOnlyTheCapturedEightWriteNineFrameBoundary()
     {

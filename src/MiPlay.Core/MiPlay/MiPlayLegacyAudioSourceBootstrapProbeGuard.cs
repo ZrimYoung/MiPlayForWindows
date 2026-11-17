@@ -30,6 +30,7 @@ public sealed class MiPlayLegacyAudioSourceBootstrapProbeGuard
 
     private readonly bool explicitlyAuthorized;
     private readonly MiPlayLegacyStatusQueryOrder statusQueryOrder;
+    private readonly byte[] expectedSourceNamePayload;
     private int writesAuthorized;
     private int framesAuthorized;
     private bool stopped;
@@ -37,7 +38,8 @@ public sealed class MiPlayLegacyAudioSourceBootstrapProbeGuard
     public MiPlayLegacyAudioSourceBootstrapProbeGuard(
         IPAddress target,
         bool explicitlyAuthorized,
-        MiPlayLegacyStatusQueryOrder statusQueryOrder = MiPlayLegacyStatusQueryOrder.VolumeMediaInfoState)
+        MiPlayLegacyStatusQueryOrder statusQueryOrder = MiPlayLegacyStatusQueryOrder.VolumeMediaInfoState,
+        string expectedSourceName = MiPlayLegacySystemAudioSessionRunner.ValidatedSourceName)
     {
         ArgumentNullException.ThrowIfNull(target);
         if (target.AddressFamily != System.Net.Sockets.AddressFamily.InterNetwork ||
@@ -53,6 +55,7 @@ public sealed class MiPlayLegacyAudioSourceBootstrapProbeGuard
         Target = target;
         this.explicitlyAuthorized = explicitlyAuthorized;
         this.statusQueryOrder = statusQueryOrder;
+        expectedSourceNamePayload = MiPlayLocalDeviceInfoPayloadCodec.EncodeLegacySourceNameOnly(expectedSourceName);
     }
 
     public IPAddress Target { get; }
@@ -165,7 +168,7 @@ public sealed class MiPlayLegacyAudioSourceBootstrapProbeGuard
         3 => frame.Command == MiPlayProtocolConstants.SetLocalDeviceInfoCommand &&
              frame.Sequence == 2 &&
              frame.Payload.AsSpan().SequenceEqual(
-                 MiPlayLocalDeviceInfoPayloadCodec.EncodeLegacySourceNameOnly("MI PAD 4/Plus")),
+                 expectedSourceNamePayload),
         4 => frame.Command == MiPlayProtocolConstants.SetLocalDeviceInfoCommand &&
              frame.Sequence == 3 &&
              frame.Payload.AsSpan().SequenceEqual(MiPlayLocalDeviceInfoPayloadCodec.EncodeIsSameAccount(0)),

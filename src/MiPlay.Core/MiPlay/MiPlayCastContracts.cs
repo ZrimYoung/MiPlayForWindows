@@ -50,7 +50,10 @@ public sealed record MiPlayCastDiagnostics(
     double MinimumEncodedAccessUnitAgeMilliseconds = 0,
     double MaximumEncodedAccessUnitAgeMilliseconds = 0,
     bool? ReceiverPaused = null,
-    bool? ContainsAudiblePcm = null);
+    bool? ContainsAudiblePcm = null,
+    int EncoderPendingInputFrames = 0,
+    int EncoderBufferedAccessUnits = 0,
+    long PrePlayDiscardedAccessUnits = 0);
 
 public sealed record MiPlaySystemAudioRequest(
     RendererDevice Renderer,
@@ -59,10 +62,12 @@ public sealed record MiPlaySystemAudioRequest(
     AudioChannelRoute ChannelRoute = AudioChannelRoute.Stereo,
     MiPlayPairSynchronization? PairSynchronization = null,
     MiPlaySharedAudioSession? SharedAudioSession = null,
-    int PlaybackDelayMicroseconds = MiPlayProtocolConstants.OtherNetworkPlaybackDelayMicroseconds)
+    int PlaybackDelayMicroseconds = MiPlayProtocolConstants.OtherNetworkPlaybackDelayMicroseconds,
+    int AudioBitRate = MiPlayProtocolConstants.AacBitRate)
 {
     public void Validate()
     {
+        MiPlayAudioQuality.Validate(AudioBitRate);
         ArgumentNullException.ThrowIfNull(Renderer);
         ArgumentNullException.ThrowIfNull(Selection);
         ArgumentException.ThrowIfNullOrWhiteSpace(FfmpegPath);
@@ -163,3 +168,13 @@ public interface IMiPlayPlaybackController
         ResumeAsync(cancellationToken);
     Task CloseAsync(CancellationToken cancellationToken = default);
 }
+
+/// <summary>Adjust the active receiver's presentation offset without rebuilding capture or transport.</summary>
+public interface IMiPlayPlaybackDelayController
+{
+    Task SetPlaybackDelayAsync(int microseconds, CancellationToken cancellationToken);
+}
+
+/// <summary>A connected receiver closed during initialization, before any audio was opened.</summary>
+public sealed class MiPlayBootstrapClosedException(string phase, Exception inner)
+    : IOException($"Receiver closed during MiPlay initialization ({phase}).", inner);

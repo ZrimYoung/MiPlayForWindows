@@ -12,6 +12,356 @@ namespace MiPlay.Tests;
 public sealed class MultiSpeakerTests
 {
     [Fact]
+    public async Task SlowDelayWriteDropsIntermediateSliderTargets()
+    {
+        using var fixture = new Fixture();
+        await using var controller = fixture.Create();
+        await controller.RefreshAsync(); await controller.SetSelectedAsync("a", true);
+        var session = Assert.Single(fixture.Sessions);
+        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var values = new List<int>();
+        session.DelayHandler = async value => {
+            values.Add(value);
+            if (value == 100) { entered.TrySetResult(); await release.Task; }
+        };
+        var first = controller.SetDelayAsync("a", 100);
+        await entered.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        var middle = controller.SetDelayAsync("a", 200);
+        var last = controller.SetDelayAsync("a", 300);
+        release.TrySetResult();
+        await Task.WhenAll(first, middle, last).WaitAsync(TimeSpan.FromSeconds(2));
+        Assert.Equal(new[] { 100, 300 }, values);
+        Assert.False(session.Disposed); Assert.Single(fixture.Sessions);
+    }
+
+    [Fact]
+    public void PeerClosingDuringHandshakeIsCompatibilityNotAnOfflineSpeaker()
+    {
+        var failure = new MiPlayBootstrapClosedException("AwaitingNativeVersionAcknowledgement", new EndOfStreamException());
+        Assert.Equal(DesktopFailure.Compatibility, CastService.ClassifyFailure(failure));
+        Assert.Equal(DesktopFailure.Offline, CastService.ClassifyFailure(new EndOfStreamException()));
+    }
+
+    [Fact]
+    public async Task QualityChangeStopsSessionsPersistsAndAppliesToNewSessions()
+    {
+        using var fixture = new Fixture();
+        await using (var controller = fixture.Create())
+        {
+            await controller.RefreshAsync();
+            foreach (var bitrate in new[] { 320000, 512000, 256000 })
+            {
+                await controller.SetSelectedAsync("a", true);
+                await controller.SetAudioBitRateAsync(bitrate);
+                Assert.All(controller.Snapshot.Speakers, card => Assert.False(card.Selected));
+                Assert.Equal(bitrate, fixture.Store.Load().AudioBitRate);
+                await controller.SetSelectedAsync("a", true);
+                Assert.Equal(bitrate, fixture.Sessions.Last().Request!.AudioBitRate);
+            }
+            await Assert.ThrowsAsync<ArgumentOutOfRangeException>(() => controller.SetAudioBitRateAsync(999999));
+            Assert.True(controller.Snapshot.Speakers.Single(s => s.Id == "a").Selected);
+        }
+        await using var reopened = fixture.Create();
+        Assert.Equal(256000, reopened.Snapshot.AudioBitRate);
+        Assert.All(reopened.Snapshot.Speakers, card => Assert.False(card.Selected));
+    }
+
+    [Fact]
+    public async Task LiveGroupDelayKeepsBothSessionsAndEncoderSelection()
+    {
+        using var fixture = StereoFixture();
+        await using var controller = fixture.Create();
+        await controller.RefreshAsync();
+        await controller.SetGroupSelectedAsync("pair", true);
+        foreach (var target in new[] { 1200, 300, 1000 })
+        {
+            await controller.SetGroupDelayAsync("pair", target);
+            Assert.Equal(2, fixture.Sessions.Count);
+            Assert.All(fixture.Sessions, session => { Assert.False(session.Disposed); Assert.Equal(target, session.Delay); });
+            Assert.All(controller.Snapshot.Speakers.Where(card => card.GroupId == "pair"), card => { Assert.True(card.Selected); Assert.Equal(target, card.DelayMilliseconds); });
+        }
+        await Assert.ThrowsAsync<ArgumentOutOfRangeException>(() => controller.SetGroupDelayAsync("pair", -10));
+        Assert.All(fixture.Sessions, session => Assert.False(session.Disposed));
+    }
+
+    [Fact]
+    public async Task SavedVolumeTimeoutDoesNotStopCastingOrDisplayUnconfirmedValue()
+    {
+        using var fixture = new Fixture { MissingVolumeAck = true };
+        await using var controller = fixture.Create();
+        await controller.RefreshAsync();
+        await controller.SetVolumeAsync("a", 57);
+        await controller.SetSelectedAsync("a", true);
+        var session = Assert.Single(fixture.Sessions);
+        var card = controller.Snapshot.Speakers.Single(s => s.Id == "a");
+        Assert.True(card.Selected);
+        Assert.Equal("Casting", card.State);
+        Assert.Contains("音量调整未获确认", card.Message);
+        Assert.Equal(30, card.Volume);
+        Assert.False(session.Disposed);
+        session.ReportStreaming();
+        Assert.Contains("音量调整未获确认", controller.Snapshot.Speakers.Single(s => s.Id == "a").Message);
+        session.MissingVolumeAck = false;
+        await controller.SetVolumeAsync("a", 58);
+        card = controller.Snapshot.Speakers.Single(s => s.Id == "a");
+        Assert.True(card.Selected);
+        Assert.Equal(58, card.Volume);
+        Assert.DoesNotContain("未获确认", card.Message);
+        Assert.False(session.Disposed);
+    }
+
+    [Fact]
+    public async Task ConfirmedStereoGroupLinksVolumeAndRetainsIndividualDelays()
+    {
+        using var fixture = new Fixture();
+        fixture.Discovery.Speakers = [
+            SpeakerAt("a", "192.0.2.2") with { Identity = new("Art L", "L09A", "pair", "客厅", "left", true) },
+            SpeakerAt("b", "192.0.2.3") with { Identity = new("Art R", "L09A", "pair", "客厅", "right", false) }
+        ];
+        await using var controller = fixture.Create();
+        await controller.RefreshAsync();
+        Assert.All(controller.Snapshot.Speakers, s => { Assert.Equal("pair", s.GroupId); Assert.False(s.Selected); });
+        await controller.SetGroupSelectedAsync("pair", true);
+        Assert.All(controller.Snapshot.Speakers, s => Assert.True(s.Selected));
+        await controller.SetVolumeAsync("a", 20);
+        Assert.All(controller.Snapshot.Speakers, s => Assert.Equal(20, s.Volume));
+        await controller.SetVolumeAsync("b", 35);
+        Assert.All(controller.Snapshot.Speakers, s => Assert.Equal(35, s.Volume));
+        Assert.All(fixture.Sessions, s => Assert.Equal(35, s.Volume));
+        Assert.All(fixture.Store.Load().Speakers!.Values, s => Assert.Equal(35, s.Volume));
+        await controller.SetDelayAsync("a", 200);
+        Assert.Equal(200, controller.Snapshot.Speakers.Single(s => s.Id == "a").DelayMilliseconds);
+        Assert.Equal(1000, controller.Snapshot.Speakers.Single(s => s.Id == "b").DelayMilliseconds);
+        await controller.SetGroupSelectedAsync("pair", false);
+        Assert.All(controller.Snapshot.Speakers, s => Assert.False(s.Selected));
+        Assert.All(fixture.Sessions, s => Assert.True(s.Disposed));
+        Assert.Equal("left", fixture.Store.Load().Speakers!["a"].Channel);
+    }
+
+    [Fact]
+    public async Task GroupVolumeKeepsBothPlayingWhenOneAcknowledgementIsMissing()
+    {
+        using var fixture = StereoFixture();
+        await using var controller = fixture.Create();
+        await controller.RefreshAsync();
+        await controller.SetGroupSelectedAsync("pair", true);
+        fixture.Sessions.Single(s => s.Request!.Renderer.Udn == "a").MissingVolumeAck = true;
+        await controller.SetGroupVolumeAsync("pair", 45);
+        Assert.All(controller.Snapshot.Speakers.Where(s => s.GroupId == "pair"), s => {
+            Assert.True(s.Selected); Assert.Equal("Casting", s.State);
+        });
+        var left = controller.Snapshot.Speakers.Single(s => s.Id == "a");
+        Assert.Equal(30, left.Volume);
+        Assert.Contains("未获确认", left.Message);
+        Assert.Equal(45, controller.Snapshot.Speakers.Single(s => s.Id == "b").Volume);
+        Assert.Null(controller.Snapshot.Speakers.Single(s => s.Id == "other").Volume);
+        Assert.All(fixture.Sessions, s => Assert.False(s.Disposed));
+    }
+
+    [Fact]
+    public async Task ConcurrentGroupVolumeChangesAreOrderedAndPersistAcrossRestart()
+    {
+        using var fixture = StereoFixture();
+        await using (var controller = fixture.Create())
+        {
+            await controller.RefreshAsync();
+            await controller.SetGroupSelectedAsync("pair", true);
+            await Task.WhenAll(controller.SetGroupVolumeAsync("pair", 20), controller.SetGroupVolumeAsync("pair", 60));
+            Assert.All(fixture.Sessions, s => Assert.Equal(60, s.Volume));
+        }
+        await using var reopened = fixture.Create();
+        await reopened.RefreshAsync();
+        Assert.All(reopened.Snapshot.Speakers.Where(s => s.GroupId == "pair"), s => {
+            Assert.Equal(60, s.Volume); Assert.False(s.Selected);
+        });
+        await reopened.SetGroupSelectedAsync("pair", true);
+        Assert.All(fixture.Sessions.Where(s => !s.Disposed), s => Assert.Equal(60, s.Volume));
+    }
+
+    [Fact]
+    public async Task InvalidGroupVolumeDoesNotChangeAnySpeaker()
+    {
+        using var fixture = StereoFixture();
+        await using var controller = fixture.Create();
+        await controller.RefreshAsync();
+        await Assert.ThrowsAsync<InvalidOperationException>(() => controller.SetGroupVolumeAsync("unknown", 40));
+        await Assert.ThrowsAsync<ArgumentException>(() => controller.SetGroupVolumeAsync("", 40));
+        await Assert.ThrowsAsync<ArgumentOutOfRangeException>(() => controller.SetGroupVolumeAsync("pair", 101));
+        Assert.All(controller.Snapshot.Speakers, s => Assert.Null(s.Volume));
+        Assert.Empty(fixture.Sessions);
+    }
+
+    [Fact]
+    public async Task JoiningStereoGroupUnifiesLegacySavedLevelsWithoutRaisingVolume()
+    {
+        using var fixture = StereoFixture();
+        fixture.Store.Save(new(Speakers: new() {
+            ["a"] = new(Volume: 50, GroupId: "pair", Channel: "left"),
+            ["b"] = new(Volume: 32, GroupId: "pair", Channel: "right")
+        }));
+        await using var controller = fixture.Create();
+        await controller.RefreshAsync();
+        // Discovery and opening the UI do not change or apply saved levels.
+        Assert.Equal(50, controller.Snapshot.Speakers.Single(s => s.Id == "a").Volume);
+        Assert.Empty(fixture.Sessions);
+        await controller.SetGroupSelectedAsync("pair", true);
+        Assert.All(fixture.Sessions, s => Assert.Equal(32, s.Volume));
+        Assert.All(fixture.Store.Load().Speakers!.Values.Where(s => s.GroupId == "pair"), s => Assert.Equal(32, s.Volume));
+    }
+
+    [Fact]
+    public async Task HardwareVolumeUpdatesSnapshotAndSavedValueWithoutEchoingACommand()
+    {
+        using var fixture = new Fixture();
+        await using var controller = fixture.Create();
+        await controller.RefreshAsync();
+        await controller.SetVolumeAsync("a", 40);
+        await controller.SetSelectedAsync("a", true);
+        var session = Assert.Single(fixture.Sessions);
+        var writes = session.VolumeWrites;
+        session.Volume = 27; // Physical button / read-only receiver response.
+        await Eventually(() => fixture.Store.Load().Speakers!["a"].Volume == 27);
+        Assert.Equal(27, controller.Snapshot.Speakers.Single(s => s.Id == "a").Volume);
+        Assert.Equal(writes, session.VolumeWrites);
+        Assert.False(session.Disposed);
+    }
+
+    [Fact]
+    public async Task RuntimeGroupDissolutionStopsFormerPairAndDoesNotAutoCastAfterRediscovery()
+    {
+        using var fixture = StereoFixture();
+        await using var controller = fixture.Create();
+        await controller.RefreshAsync();
+        await controller.SetGroupSelectedAsync("pair", true);
+        await controller.SetSelectedAsync("other", true);
+        var left = fixture.Sessions.Single(s => s.Request!.Renderer.Udn == "a");
+        var independent = fixture.Sessions.Single(s => s.Request!.Renderer.Udn == "other");
+        left.ReceiverIdentity = new("Art L", "L09A", "", "", "center", false);
+        await Eventually(() => fixture.Sessions.Where(s => s != independent).All(s => s.Disposed));
+        Assert.All(controller.Snapshot.Speakers.Where(s => s.Id != "other"), s => Assert.False(s.Selected));
+        Assert.False(independent.Disposed);
+        Assert.Empty(controller.Snapshot.Speakers.Single(s => s.Id == "a").GroupId);
+        fixture.Discovery.Speakers = [SpeakerAt("a", "192.0.2.22") with { Identity = left.ReceiverIdentity },
+            SpeakerAt("b", "192.0.2.3") with { Identity = new("Art R", "L09A", "", "", "center", false) }];
+        await controller.RefreshAsync();
+        Assert.All(controller.Snapshot.Speakers, s => Assert.Empty(s.GroupId));
+        Assert.Equal(3, fixture.Sessions.Count);
+        Assert.All(controller.Snapshot.Speakers.Where(s => s.Id != "other"), s => Assert.False(s.Selected));
+        Assert.True(controller.Snapshot.Speakers.Single(s => s.Id == "other").Selected);
+    }
+
+    [Fact]
+    public async Task LaterReceiverReadResolvesUnconfirmedVolumeWithoutStoppingPlayback()
+    {
+        using var fixture = new Fixture { MissingVolumeAck = true };
+        await using var controller = fixture.Create();
+        await controller.RefreshAsync();
+        await controller.SetVolumeAsync("a", 57);
+        await controller.SetSelectedAsync("a", true);
+        var session = Assert.Single(fixture.Sessions);
+        Assert.Contains("未获确认", controller.Snapshot.Speakers.Single(s => s.Id == "a").Message);
+        session.Volume = 57;
+        await Eventually(() => controller.Snapshot.Speakers.Single(s => s.Id == "a").Failure == "None");
+        Assert.Equal(57, controller.Snapshot.Speakers.Single(s => s.Id == "a").Volume);
+        Assert.True(controller.Snapshot.Speakers.Single(s => s.Id == "a").Selected);
+        Assert.False(session.Disposed);
+    }
+
+    [Fact]
+    public async Task RediscoveryAndGroupRejoinDoNotRestartTheHealthyMember()
+    {
+        var now = DateTimeOffset.UtcNow;
+        using var fixture = StereoFixture();
+        await using var controller = fixture.Create(() => now);
+        await controller.RefreshAsync();
+        await controller.SetGroupSelectedAsync("pair", true);
+        var left = fixture.Sessions.Single(s => s.Request!.Renderer.Udn == "a");
+        await controller.SetSelectedAsync("b", false);
+        fixture.Discovery.Speakers = fixture.Discovery.Speakers.Where(s => s.Id != "b").ToArray();
+        now = now.AddSeconds(30);
+        await controller.RefreshAsync();
+        Assert.False(controller.Snapshot.Speakers.Single(s => s.Id == "b").Online);
+        Assert.True(controller.Snapshot.Speakers.Single(s => s.Id == "a").Selected);
+        await Assert.ThrowsAsync<InvalidOperationException>(() => controller.SetGroupSelectedAsync("pair", true));
+        fixture.Discovery.Speakers = [..fixture.Discovery.Speakers, SpeakerAt("b", "192.0.2.99") with {
+            Identity = new("Art R", "L09A", "pair", "客厅", "right", false) }];
+        await controller.RefreshAsync();
+        Assert.False(controller.Snapshot.Speakers.Single(s => s.Id == "b").Selected);
+        await controller.SetGroupSelectedAsync("pair", true);
+        Assert.False(left.Disposed);
+        Assert.Equal(3, fixture.Sessions.Count);
+        Assert.Equal(IPAddress.Parse("192.0.2.99"), fixture.Sessions.Last().Request!.Renderer.Address);
+        Assert.All(controller.Snapshot.Speakers.Where(s => s.GroupId == "pair"), s => Assert.True(s.Selected));
+    }
+
+    [Fact]
+    public async Task PartialDeviceInfoDoesNotDissolveAKnownPlayingGroup()
+    {
+        using var fixture = StereoFixture();
+        await using var controller = fixture.Create();
+        await controller.RefreshAsync();
+        await controller.SetGroupSelectedAsync("pair", true);
+        fixture.Discovery.Speakers = fixture.Discovery.Speakers.Select(s => s.Id == "a" ? s with {
+            Identity = new("Renamed Art", "L09A", "", "", "", false, HasGroupInfo: false) } : s).ToArray();
+        await controller.RefreshAsync();
+        var left = controller.Snapshot.Speakers.Single(s => s.Id == "a");
+        Assert.Equal("pair", left.GroupId);
+        Assert.Equal("Renamed Art", left.Name);
+        fixture.Discovery.Speakers = fixture.Discovery.Speakers.Select(s => s.Id == "a" ? s with {
+            Identity = new("Renamed Art", "L09A", "pair", "客厅", "", false) } : s).ToArray();
+        await controller.RefreshAsync();
+        Assert.Equal("left", controller.Snapshot.Speakers.Single(s => s.Id == "a").Channel);
+        Assert.All(controller.Snapshot.Speakers.Where(s => s.GroupId == "pair"), s => Assert.True(s.Selected));
+        Assert.All(fixture.Sessions, s => Assert.False(s.Disposed));
+    }
+
+    private static Fixture StereoFixture()
+    {
+        var fixture = new Fixture();
+        fixture.Discovery.Speakers = [
+            SpeakerAt("a", "192.0.2.2") with { Identity = new("Art L", "L09A", "pair", "客厅", "left", true) },
+            SpeakerAt("b", "192.0.2.3") with { Identity = new("Art R", "L09A", "pair", "客厅", "right", false) },
+            SpeakerAt("other", "192.0.2.4")
+        ];
+        return fixture;
+    }
+
+    [Fact]
+    public async Task UnknownOrIncompleteStereoGroupCannotStartAnotherSpeaker()
+    {
+        using var fixture = new Fixture();
+        fixture.Discovery.Speakers = [SpeakerAt("a", "192.0.2.2") with {
+            Identity = new("Art L", "L09A", "pair", "客厅", "left", true) }];
+        await using var controller = fixture.Create();
+        await controller.RefreshAsync();
+        await Assert.ThrowsAsync<InvalidOperationException>(() => controller.SetGroupSelectedAsync("pair", true));
+        await Assert.ThrowsAsync<InvalidOperationException>(() => controller.SetGroupSelectedAsync("unknown", true));
+        Assert.Empty(fixture.Sessions);
+    }
+
+    [Fact]
+    public async Task SwitchingToCompatibilityStopsAllAndPersistsWithoutAutostart()
+    {
+        using var fixture = new Fixture();
+        await using (var controller = fixture.Create())
+        {
+            Assert.True(controller.Snapshot.SynchronizedPlayback);
+            await controller.RefreshAsync();
+            await controller.SetSelectedAsync("a", true);
+            await controller.SetSelectedAsync("b", true);
+            await controller.SetSynchronizedPlaybackAsync(false);
+            Assert.False(controller.Snapshot.SynchronizedPlayback);
+            Assert.All(controller.Snapshot.Speakers, speaker => Assert.False(speaker.Selected));
+            Assert.All(fixture.Sessions, session => Assert.True(session.Disposed));
+            Assert.False(fixture.Store.Load().SynchronizedPlayback);
+        }
+        await using var reopened = fixture.Create();
+        Assert.False(reopened.Snapshot.SynchronizedPlayback);
+        Assert.Equal(2, fixture.Sessions.Count);
+    }
+
+    [Fact]
     public async Task IndependentVolumeAndDelaySurviveRestartAndAddressChanges()
     {
         using var fixture = new Fixture();
@@ -25,12 +375,12 @@ public sealed class MultiSpeakerTests
             await controller.SetVolumeAsync("a", 25);
             await controller.SetVolumeAsync("b", 61);
             await controller.SetDelayAsync("a", 200);
-            Assert.True(firstA.Disposed);
+            Assert.False(firstA.Disposed);
+            Assert.Equal(200, firstA.Delay);
+            Assert.Equal(2, fixture.Sessions.Count);
             Assert.False(firstB.Disposed);
             Assert.Equal(61, firstB.Volume);
-            var latest = fixture.Sessions.Last();
-            Assert.Equal(200_000, latest.Request!.PlaybackDelayMicroseconds);
-            Assert.Equal(25, latest.Volume);
+            Assert.Equal(25, firstA.Volume);
             Assert.All(controller.Snapshot.Speakers, s => Assert.True(s.Selected));
             await controller.SetSelectedAsync("a", false);
             Assert.False(firstB.Disposed);
@@ -208,9 +558,10 @@ public sealed class MultiSpeakerTests
         public readonly FakeDiscovery Discovery = new() { Speakers = [SpeakerAt("a", "192.0.2.2"), SpeakerAt("b", "192.0.2.3")] };
         public readonly ConcurrentQueue<FakeSession> Sessions = new();
         public bool BlockStarts;
+        public bool MissingVolumeAck;
         public DesktopStore Store => new(directory.FullName);
         public DesktopController Create(Func<DateTimeOffset>? now = null) => new(Platform, Discovery, Store,
-            () => { var session = new FakeSession { BlockStartup = BlockStarts }; Sessions.Enqueue(session); return session; },
+            () => { var session = new FakeSession { BlockStartup = BlockStarts, MissingVolumeAck = MissingVolumeAck }; Sessions.Enqueue(session); return session; },
             () => "test", TimeSpan.FromMilliseconds(10), now: now);
         public void Dispose() { Platform.Dispose(); directory.Delete(true); }
     }
@@ -251,6 +602,13 @@ public sealed class MultiSpeakerTests
         public MiPlaySystemAudioRequest? Request;
         public bool Disposed, BlockStartup;
         public int? Volume;
+        public int? Delay;
+        public Func<int, Task>? DelayHandler;
+        public int VolumeWrites;
+        public SpeakerIdentity? ReceiverIdentity { get; set; }
+        public bool MissingVolumeAck;
+        public int? ReceiverVolume => Volume ?? 30;
+        public void ReportStreaming() => DiagnosticsChanged?.Invoke(this, new(MiPlayCastState.Streaming, ""));
         public MiPlayCastDiagnostics Diagnostics { get; private set; } = new(MiPlayCastState.Idle, "");
         public event EventHandler<MiPlayCastDiagnostics>? DiagnosticsChanged;
         public async Task StartAsync(MiPlaySystemAudioRequest request, CancellationToken token)
@@ -260,8 +618,14 @@ public sealed class MultiSpeakerTests
             Diagnostics = new(MiPlayCastState.Streaming, ""); DiagnosticsChanged?.Invoke(this, Diagnostics);
         }
         public Task StopAsync() => Task.CompletedTask;
-        public Task SetVolumeAsync(int volume, CancellationToken token) { Volume = volume; return Task.CompletedTask; }
+        public Task SetVolumeAsync(int volume, CancellationToken token)
+        {
+            VolumeWrites++;
+            if (MissingVolumeAck) throw new MiPlayVolumeAcknowledgementTimeoutException(16);
+            Volume = volume; return Task.CompletedTask;
+        }
         public Task SetCaptureAsync(CaptureSelection selection, CancellationToken token) => Task.CompletedTask;
+        public async Task SetDelayAsync(int milliseconds, CancellationToken token) { if (DelayHandler is not null) await DelayHandler(milliseconds); Delay = milliseconds; }
         public ValueTask DisposeAsync() { Disposed = true; return ValueTask.CompletedTask; }
     }
 }
