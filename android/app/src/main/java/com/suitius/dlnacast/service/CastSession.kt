@@ -23,6 +23,8 @@ interface CastSession : AutoCloseable {
     suspend fun setReceiverVolume(volume: Int, receiverIndex: Int? = null): Unit =
         error("当前投送协议不支持设置音箱音量")
     suspend fun setCaptureUid(uid: Int?): Unit = error("当前投送协议不支持运行中切换音源")
+    suspend fun localSpeakerMuteState(): Boolean? = null
+    suspend fun setLocalSpeakerMuted(muted: Boolean): Boolean = error("手机扬声器静音需要 Shizuku 音频捕获")
 }
 
 data class ReceiverControlState(

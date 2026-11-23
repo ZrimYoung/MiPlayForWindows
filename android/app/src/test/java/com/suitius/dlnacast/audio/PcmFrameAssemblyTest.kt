@@ -52,6 +52,19 @@ class PcmFrameAssemblyTest {
         }
     }
 
+    @Test
+    fun switchingCaptureSourceDiscardsQueuedAndPartialFrames() {
+        PcmFrameBuffer(4).use { buffer ->
+            val frameSize = buffer.frameByteCount
+            buffer.offer(ByteArray(frameSize + frameSize / 2) { 1 })
+            buffer.discardPendingAudio()
+            assertEquals(0, buffer.bufferedMilliseconds)
+            val replacement = ByteArray(frameSize) { 2 }
+            buffer.offer(replacement)
+            assertArrayEquals(replacement, buffer.pollFrameOrSilence())
+        }
+    }
+
     @Test(timeout = 3_000)
     fun sequenceBufferBackpressureDoesNotDropFramesAndCloseUnblocksWriter() {
         val buffer = PcmFrameBuffer(1, 4_096, true)

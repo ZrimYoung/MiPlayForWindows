@@ -1,14 +1,11 @@
 package com.suitius.dlnacast.miplay
 
-import android.content.Context
-import android.media.projection.MediaProjection
 import android.util.Log
 import com.suitius.dlnacast.audio.AudioChannelRoute
 import com.suitius.dlnacast.audio.PcmFrameBuffer
 import com.suitius.dlnacast.audio.PcmAudioCapture
-import com.suitius.dlnacast.audio.PlaybackAudioCapture
-import com.suitius.dlnacast.audio.RootPlaybackAudioCapture
 import com.suitius.dlnacast.audio.RoutedPcmOutput
+import com.suitius.dlnacast.audio.ShizukuPlaybackAudioCapture
 import com.suitius.dlnacast.audio.applyToStereoPcm16
 import com.suitius.dlnacast.model.DlnaRenderer
 import com.suitius.dlnacast.service.CastSession
@@ -32,19 +29,18 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 
 class MiPlayCastSession(
-    context: Context,
     private val renderers: List<DlnaRenderer>,
-    projection: MediaProjection?,
-    private val onProjectionStopped: () -> Unit,
-    matchingUid: Int? = null,
+    createCapture: (List<RoutedPcmOutput>) -> PcmAudioCapture,
     private val channelRoutes: List<AudioChannelRoute> = List(renderers.size) { AudioChannelRoute.Stereo },
     private val playbackDelayMicroseconds: Int = 1_000_000,
-    rootCapture: Boolean = false,
     private val report: (String) -> Unit,
 ) : CastSession {
     init {
@@ -63,20 +59,9 @@ class MiPlayCastSession(
             PcmFrameBuffer.MIPLAY_FRAME_BYTES, preserveFrameSequence = true)
     }
     private val diagnosticFrames = sourceFrames
-    private val capture: PcmAudioCapture = if (rootCapture) {
-        RootPlaybackAudioCapture(
-            context = context,
-            outputs = listOf(RoutedPcmOutput(sourceFrames, AudioChannelRoute.Stereo)),
-        )
-    } else {
-        PlaybackAudioCapture(
-            context = context,
-            projection = requireNotNull(projection) { "MediaProjection capture requires a projection token" },
-            outputs = listOf(RoutedPcmOutput(sourceFrames, AudioChannelRoute.Stereo)),
-            onProjectionStopped = onProjectionStopped,
-            matchingUid = matchingUid,
-        )
-    }
+    private val capture = createCapture(listOf(RoutedPcmOutput(sourceFrames, AudioChannelRoute.Stereo)))
+    private val shizukuCapture = capture as? ShizukuPlaybackAudioCapture
+    @Volatile private var currentTrack: MiPlayTrackMetadata? = null
     private val closed = AtomicBoolean(false)
     private val accessUnits = AtomicLong(0)
     private val rtpFrames = AtomicLong(0)
@@ -84,6 +69,7 @@ class MiPlayCastSession(
     private val lastAacBytes = AtomicLong(0)
     private val maximumSendSkewMicroseconds = AtomicLong(0)
     private val receivers = CopyOnWriteArrayList<ReceiverConnection>()
+    private val membership = Mutex()
     private val sharedTimeOffset = MiPlaySharedTimeOffsetState()
     private val sharedMedia = MiPlaySharedMediaBroadcaster(MAX_RECEIVERS)
     private val sharedSendCompletion = MiPlaySharedSendCompletionCoordinator(MAX_RECEIVERS)
@@ -101,6 +87,7 @@ class MiPlayCastSession(
     override val receiverPaused: Boolean
         get() = receivers.isNotEmpty() && receivers.all { it.control.receiverPaused }
     override val receiverVolume: Int? get() = receivers.firstOrNull()?.control?.receiverVolume
+    val activeRenderers: List<DlnaRenderer> get() = receivers.map { it.renderer }
     override val receiverControls: List<ReceiverControlState>
         get() = receivers.map { receiver ->
             ReceiverControlState(
@@ -112,6 +99,10 @@ class MiPlayCastSession(
             )
         }
     override val failureMessage: String? get() = failure ?: capture.failureMessage
+
+    override suspend fun localSpeakerMuteState() = shizukuCapture?.isSpeakerMuted()
+    override suspend fun setLocalSpeakerMuted(muted: Boolean) =
+        shizukuCapture?.setSpeakerMuted(muted) ?: super.setLocalSpeakerMuted(muted)
 
     override val streamDetail: String
         get() {
@@ -127,6 +118,7 @@ class MiPlayCastSession(
         check(!closed.get()) { "MiPlay session is closed" }
         phaseReport("启动 Android 系统音频捕获与共享 AAC 编码器")
         capture.start()
+        currentTrack = readTrackMetadata()
         buffersByRoute.forEach { (route, buffer) -> encoders[route] = MiPlayAacEncoder(buffer) }
         pcmJob = scope.launch {
             runCatching { fanOutPcm() }.onFailure {
@@ -173,7 +165,26 @@ class MiPlayCastSession(
         withTimeout(10_000) { firstMedia.await() }
         receivers.forEach { it.receiverState = "等待 first-audiopcm/state" }
         phaseReport("首个 MiPlay AAC 访问单元已同步发送到 ${receivers.size} 台音箱")
+        if (shizukuCapture != null) scope.launch {
+            while (isActive) {
+                delay(1_000)
+                val snapshot = readTrackMetadata()
+                currentTrack = snapshot
+                receivers.forEach { receiver ->
+                    runCatching { receiver.updateTrack(snapshot) }
+                        .onFailure { Log.w(LOG_TAG, "Could not update receiver track information") }
+                }
+            }
+        }
     }
+
+    private fun readTrackMetadata(): MiPlayTrackMetadata? =
+        runCatching { shizukuCapture?.readTrackMetadata() }.getOrNull()?.let { track ->
+            MiPlayTrackMetadata(
+                track.title, track.artist, track.album, track.durationMillis,
+                track.positionMillis, track.artworkJpeg, track.trackId,
+            )
+        }
 
     override suspend fun pauseReceiver() {
         check(receivers.isNotEmpty()) { "MiPlay 控制连接尚未就绪" }
@@ -200,6 +211,15 @@ class MiPlayCastSession(
         val targets = receiverIndex?.let { index ->
             listOf(receivers.getOrNull(index) ?: error("找不到第 ${index + 1} 台 MiPlay 音箱"))
         } ?: receivers
+        setVolume(volume, targets)
+    }
+
+    suspend fun setGroupVolume(volume: Int, rendererIds: Set<String>) {
+        val targets = receivers.filter { it.renderer.id in rendererIds }
+        if (targets.isNotEmpty()) setVolume(volume, targets)
+    }
+
+    private suspend fun setVolume(volume: Int, targets: List<ReceiverConnection>) {
         coroutineScope {
             targets.map { receiver ->
                 async(Dispatchers.IO) {
@@ -210,7 +230,24 @@ class MiPlayCastSession(
         }
     }
 
-    suspend fun addReceiver(renderer: DlnaRenderer) {
+    suspend fun addReceivers(renderers: List<DlnaRenderer>) = membership.withLock {
+        val added = mutableListOf<DlnaRenderer>()
+        val requested = renderers.distinctBy(DlnaRenderer::id).filter { renderer ->
+            receivers.none { it.renderer.id == renderer.id || it.renderer.host == renderer.host }
+        }
+        check(receivers.size + requested.size <= MAX_RECEIVERS) { "MiPlay 音箱数量超过协议组上限" }
+        try {
+            for (renderer in requested) {
+                addReceiver(renderer)
+                added += renderer
+            }
+        } catch (error: Throwable) {
+            for (renderer in added.asReversed()) removeReceiver(renderer.id)
+            throw error
+        }
+    }
+
+    private suspend fun addReceiver(renderer: DlnaRenderer) {
         check(!closed.get()) { "MiPlay session is closed" }
         if (receivers.any { it.renderer.id == renderer.id }) return
         check(receivers.size < MAX_RECEIVERS) { "MiPlay 音箱数量超过协议组上限" }
@@ -227,7 +264,10 @@ class MiPlayCastSession(
         phaseReport("正在加入第 ${receivers.size + 1} 台音箱：${renderer.name}")
         try {
             receiver.start()
-            receivers += receiver
+            synchronized(receivers) {
+                check(!closed.get()) { "MiPlay session is closed" }
+                receivers += receiver
+            }
             phaseReport("${renderer.name} 已加入当前 MiPlay 会话")
         } catch (error: Throwable) {
             receiver.close()
@@ -235,7 +275,12 @@ class MiPlayCastSession(
         }
     }
 
-    suspend fun removeReceiver(rendererId: String) {
+    suspend fun removeReceivers(rendererIds: Set<String>) = membership.withLock {
+        check(receivers.any { it.renderer.id !in rendererIds }) { "最后一组音箱应通过停止投送断开" }
+        for (id in rendererIds) removeReceiver(id)
+    }
+
+    private fun removeReceiver(rendererId: String) {
         val receiver = receivers.firstOrNull { it.renderer.id == rendererId } ?: return
         check(receivers.size > 1) { "最后一台音箱应通过停止投送断开" }
         receivers.remove(receiver)
@@ -347,8 +392,8 @@ class MiPlayCastSession(
 
     override fun close() {
         if (!closed.compareAndSet(false, true)) return
-        receivers.forEach(ReceiverConnection::close)
-        receivers.clear()
+        val connected = synchronized(receivers) { receivers.toList().also { receivers.clear() } }
+        connected.forEach(ReceiverConnection::close)
         scope.cancel()
         sourceFrames.close()
         buffersByRoute.values.forEach(PcmFrameBuffer::close)
@@ -367,6 +412,9 @@ class MiPlayCastSession(
         lateinit var audioOutput: BufferedOutputStream
             private set
         @Volatile var receiverState = "等待音箱"
+        @Volatile private var metadataReady = false
+        private var mediaInfoSent = false
+        private var lastTrack: MiPlayTrackMetadata? = null
 
         private var reverseListener: ServerSocket? = null
         private var timerSocket: DatagramSocket? = null
@@ -382,8 +430,9 @@ class MiPlayCastSession(
 
         suspend fun start() {
             val target = java.net.InetAddress.getByName(renderer.host)
-            reportReceiver("连接 ${renderer.host}:8899")
-            control = MiPlayControlConnection(target, ::reportReceiver)
+            val port = renderer.miPlayControlPort ?: 8899
+            reportReceiver("连接 ${renderer.host}:$port")
+            control = MiPlayControlConnection(target, port, renderer.usesSecureMiPlay, ::reportReceiver)
             control.connectAndBootstrap()
             control.preparePlayback()
 
@@ -407,13 +456,14 @@ class MiPlayCastSession(
                 timer.localPort,
                 playbackDelayMicroseconds,
                 timeOffsetProvider,
-                ::reportReceiver,
+                fusionPlay = renderer.usesSecureMiPlay,
+                report = ::reportReceiver,
             )
             rtspServer = server
             rtspJob = scope.launch {
                 runCatching {
                     server.run(
-                        onPlay = control::sendMediaInfo,
+                        onPlay = { sendTrack(currentTrack) },
                         onReady = { rtspReady.complete(it) },
                     )
                 }.onFailure { throwable ->
@@ -438,6 +488,7 @@ class MiPlayCastSession(
                     if (!closed.get()) markFailure("${renderer.name} 运行期控制", error)
                 },
             )
+            metadataReady = true
             mediaSubscription = sharedMedia.register(channelRoute)
             sharedSendCompletion.register(
                 mediaSubscription!!.participantId,
@@ -455,6 +506,21 @@ class MiPlayCastSession(
             receiverState = "媒体链路已就绪"
         }
 
+        fun updateTrack(track: MiPlayTrackMetadata?) {
+            if (metadataReady) sendTrack(track)
+        }
+
+        @Synchronized
+        private fun sendTrack(track: MiPlayTrackMetadata?) {
+            val previous = lastTrack
+            val sameInfo = previous?.copy(positionMillis = null, artworkJpeg = null) ==
+                track?.copy(positionMillis = null, artworkJpeg = null)
+            if (mediaInfoSent && sameInfo && previous?.artworkJpeg.contentEquals(track?.artworkJpeg)) return
+            control.sendMediaInfo(track)
+            lastTrack = track
+            mediaInfoSent = true
+        }
+
         private fun accept(listener: ServerSocket, label: String): Socket = try {
             listener.accept()
         } catch (timeout: SocketTimeoutException) {
@@ -464,6 +530,7 @@ class MiPlayCastSession(
         private fun reportReceiver(message: String) = phaseReport("${renderer.name}：$message")
 
         override fun close() {
+            metadataReady = false
             if (::control.isInitialized) runCatching { control.close() }
             runCatching { reverseListener?.close() }
             runCatching { timerSocket?.close() }

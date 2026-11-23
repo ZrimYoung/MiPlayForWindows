@@ -63,6 +63,7 @@ internal fun runtimeAcknowledgementMatches(
 
 internal object MiPlayCommands {
     const val OPEN = 0x0000
+    const val OPEN_ACK = 0x0001
     const val CLOSE = 0x0002
     const val PAUSE = 0x0004
     const val PAUSE_ACK = 0x0005
@@ -89,6 +90,7 @@ internal object MiPlayCommands {
     const val NATIVE_VERSION = 0x0036
     const val NATIVE_VERSION_ACK = 0x0037
     const val SET_PLAY_SOURCE = 0x0040
+    const val SET_PLAY_SOURCE_ACK = 0x0041
     const val SET_LOCAL_DEVICE_INFO = 0x0058
     const val SET_LOCAL_DEVICE_INFO_ACK = 0x0059
 }
@@ -126,13 +128,16 @@ internal object MiPlayCommandCodec {
 
 internal class MiPlayControlConnection(
     private val target: InetAddress,
+    private val port: Int,
+    private val useSecureControl: Boolean = false,
     private val report: (String) -> Unit,
 ) : AutoCloseable {
     private val socket = Socket()
     private lateinit var input: BufferedInputStream
     private lateinit var output: BufferedOutputStream
+    private var secureControl: MiPlaySecureControl? = null
     private val writeLock = Any()
-    private var runtimeSequence = 16
+    private var runtimeSequence = 15
     private var runtimeJob: Job? = null
     private val runtimeCommandMutex = Mutex()
     private val pendingLock = Any()
@@ -149,10 +154,15 @@ internal class MiPlayControlConnection(
     fun connectAndBootstrap() {
         socket.tcpNoDelay = true
         socket.soTimeout = 10_000
-        socket.connect(InetSocketAddress(target, 8899), 5_000)
+        socket.connect(InetSocketAddress(target, port), 5_000)
         input = BufferedInputStream(socket.getInputStream(), 64 * 1024)
         output = BufferedOutputStream(socket.getOutputStream(), 64 * 1024)
-        report("MiPlay 8899 已连接，等待安全挑战")
+        report("MiPlay $port 已连接，等待安全挑战")
+
+        if (useSecureControl) {
+            initializeSecureControl()
+            return
+        }
 
         val challenge = readExpected("安全挑战") { it.command == MiPlayCommands.LEGACY_CHALLENGE }
         require(challenge.payload.size in 12..17 && challenge.payload.all { it in '0'.code.toByte()..'9'.code.toByte() }) {
@@ -211,6 +221,19 @@ internal class MiPlayControlConnection(
     }
 
     fun preparePlayback() {
+        if (useSecureControl) {
+            exchangeSecureCommand(
+                MiPlayCommands.SET_PLAY_SOURCE,
+                13,
+                MiPlayCommands.SET_PLAY_SOURCE_ACK,
+                """{"ref_channel":"system_audio","ref_function":"single_room","ref_content":"miplay_cast"}""".encodeToByteArray(),
+            )
+            // FusionPlay publishes its media snapshot as an unsolicited notification.
+            writeEncodedControl(MiPlayCommands.GET_MEDIA_INFO, 8)
+            report("MiPlay 播放控制已就绪")
+            return
+        }
+
         write(sourceNameFrame(8))
         write(MiPlayCommandCodec.encode(MiPlayCommands.GET_DEVICE_INFO, 9))
         waitForPair(
@@ -242,14 +265,55 @@ internal class MiPlayControlConnection(
 
     fun sendOpen(sourceAddress: InetAddress, reversePort: Int) {
         val payload = "wfd://${sourceAddress.hostAddress}:$reversePort?mirrorMode=1\u0000"
-        write(encodeText(MiPlayCommands.OPEN, 14, payload))
+        if (useSecureControl) {
+            val reply = exchangeSecureCommand(MiPlayCommands.OPEN, 14, MiPlayCommands.OPEN_ACK, payload.encodeToByteArray())
+            check(reply.payload.firstOrNull() == 0.toByte()) { "MiPlay 接收端拒绝开始播放" }
+        } else {
+            write(encodeText(MiPlayCommands.OPEN, 14, payload))
+        }
         report("已发送 MiPlay Open，等待音箱反向连接")
     }
 
-    fun sendMediaInfo() {
-        val payload = "{\"mArtist\":\"Android\",\"mAlbum\":\"\",\"mTitle\":\"System Audio\",\"mDuration\":2147483647,\"id\":\"\",\"mCoverUrl\":\"\",\"status\":0,\"volume\":24,\"mArt\":\"\",\"mSourceName\":\"MI PAD 4/Plus\",\"mDeviceState\":2}"
-        write(encodeText(MiPlayCommands.SET_MEDIA_INFO, 15, payload))
+    fun sendMediaInfo() = sendMediaInfo(null)
+
+    fun sendMediaInfo(metadata: MiPlayTrackMetadata?) {
+        val sourceName = if (useSecureControl) "MiPlay Cast" else "MI PAD 4/Plus"
+        val payload = encodeMiPlayTrackMetadata(
+            metadata = metadata,
+            sourceName = sourceName,
+            volume = receiverVolume ?: 24,
+            unknownDurationMillis = if (useSecureControl) 0 else Int.MAX_VALUE,
+        )
+        writeRuntime(MiPlayCommands.SET_MEDIA_INFO, payload)
         report("MiPlay 媒体信息已发送")
+    }
+
+    private fun initializeSecureControl() {
+        secureControl = MiPlaySecureControl(socket).also { it.authenticate(input, output) }
+        report("MiPlay 接收端双向鉴权通过")
+        exchangeSecureCommand(MiPlayCommands.GET_DEVICE_INFO, 3, MiPlayCommands.GET_DEVICE_INFO_ACK)
+        exchangeSecureCommand(
+            MiPlayCommands.SET_LOCAL_DEVICE_INFO,
+            4,
+            MiPlayCommands.SET_LOCAL_DEVICE_INFO_ACK,
+            """{"sourceName":"MiPlay Cast"}""".encodeToByteArray(),
+        )
+        exchangeSecureCommand(MiPlayCommands.GET_MIRROR_MODE, 5, MiPlayCommands.GET_MIRROR_MODE_ACK)
+        val volume = exchangeSecureCommand(MiPlayCommands.GET_VOLUME, 6, MiPlayCommands.GET_VOLUME_ACK)
+        receiverVolume = decodeStatusScalar(volume.payload)?.takeIf { it in 0..100 }
+        val state = exchangeSecureCommand(MiPlayCommands.GET_STATE, 7, MiPlayCommands.GET_STATE_ACK)
+        receiverPaused = decodeStatusScalar(state.payload) == 3
+        report("MiPlay 基础初始化完成")
+    }
+
+    private fun exchangeSecureCommand(
+        command: Int,
+        sequence: Int,
+        acknowledgement: Int,
+        payload: ByteArray = ByteArray(0),
+    ): MiPlayCommandFrame {
+        writeEncodedControl(command, sequence, payload)
+        return readExpected("加密控制确认") { it.command == acknowledgement && it.sequence == sequence }
     }
 
     fun startRuntime(
@@ -282,7 +346,7 @@ internal class MiPlayControlConnection(
                     }
                     try {
                         while (isActive) {
-                            val frame = MiPlayCommandCodec.read(input)
+                            val frame = readControl()
                             when (frame.command) {
                                 MiPlayCommands.HEARTBEAT,
                                 MiPlayCommands.HEARTBEAT_ACK -> {
@@ -297,12 +361,15 @@ internal class MiPlayControlConnection(
                                         )
                                     }
                                 }
-                                MiPlayCommands.NOTIFY -> decodeNotify(frame.payload)?.let { state ->
-                                    when (state) {
-                                        "state=2" -> receiverPaused = false
-                                        "state=3" -> receiverPaused = true
+                                MiPlayCommands.NOTIFY -> {
+                                    if (useSecureControl) decodeSecureVolumeNotify(frame.payload)?.let { receiverVolume = it }
+                                    decodeNotify(frame.payload)?.let { state ->
+                                        when (state) {
+                                            "state=2" -> receiverPaused = false
+                                            "state=3" -> receiverPaused = true
+                                        }
+                                        onReceiverState(state)
                                     }
-                                    onReceiverState(state)
                                 }
                                 else -> {
                                     val matched = synchronized(pendingLock) {
@@ -351,19 +418,23 @@ internal class MiPlayControlConnection(
     suspend fun resumeReceiver() {
         runtimeCommandMutex.withLock {
             writeRuntime(MiPlayCommands.RESUME)
-            delay(CAPTURED_RESUME_REPEAT_DELAY_MILLISECONDS)
-            writeRuntime(MiPlayCommands.RESUME)
+            if (!useSecureControl) {
+                delay(CAPTURED_RESUME_REPEAT_DELAY_MILLISECONDS)
+                writeRuntime(MiPlayCommands.RESUME)
+            }
         }
     }
 
     suspend fun setReceiverVolume(volume: Int) {
         require(volume in 0..100) { "MiPlay 音量必须在 0 到 100 之间" }
+        val payload = encodeRawVolume(volume)
         val acknowledgement = sendRuntimeAndAwaitAcknowledgement(
             command = MiPlayCommands.SET_VOLUME,
             acknowledgementCommand = MiPlayCommands.SET_VOLUME_ACK,
-            payload = encodeRawVolume(volume),
+            payload = payload,
+            expectedPayload = if (useSecureControl) ByteArray(0) else payload,
         )
-        receiverVolume = decodeRawVolume(acknowledgement.payload)
+        receiverVolume = if (useSecureControl) volume else decodeRawVolume(acknowledgement.payload)
             ?: error("MiPlay 音量 ACK 载荷无效")
     }
 
@@ -371,6 +442,7 @@ internal class MiPlayControlConnection(
         command: Int,
         acknowledgementCommand: Int,
         payload: ByteArray,
+        expectedPayload: ByteArray = payload,
     ): MiPlayCommandFrame = runtimeCommandMutex.withLock {
         val completion = CompletableDeferred<MiPlayCommandFrame>()
         val sequence: Int
@@ -385,11 +457,11 @@ internal class MiPlayControlConnection(
                     command,
                     acknowledgementCommand,
                     sequence,
-                    payload.copyOf(),
+                    expectedPayload.copyOf(),
                     completion,
                 )
             }
-            output.write(MiPlayCommandCodec.encode(command, sequence, payload))
+            output.write(encodeControl(command, sequence, payload))
             output.flush()
         }
         try {
@@ -420,9 +492,18 @@ internal class MiPlayControlConnection(
     }
 
     private fun writeRuntimeWithSequenceLocked(command: Int, sequence: Int, payload: ByteArray) {
-        output.write(MiPlayCommandCodec.encode(command, sequence, payload))
+        output.write(encodeControl(command, sequence, payload))
         output.flush()
     }
+
+    private fun writeEncodedControl(command: Int, sequence: Int, payload: ByteArray = ByteArray(0)) {
+        synchronized(writeLock) { writeRuntimeWithSequenceLocked(command, sequence, payload) }
+    }
+
+    private fun encodeControl(command: Int, sequence: Int, payload: ByteArray): ByteArray =
+        secureControl?.encode(command, sequence, payload) ?: MiPlayCommandCodec.encode(command, sequence, payload)
+
+    private fun readControl() = secureControl?.read(input) ?: MiPlayCommandCodec.read(input)
 
     private fun waitForPair(
         stage: String,
@@ -443,7 +524,7 @@ internal class MiPlayControlConnection(
 
     private fun readExpected(stage: String, predicate: (MiPlayCommandFrame) -> Boolean): MiPlayCommandFrame {
         while (true) {
-            val frame = MiPlayCommandCodec.read(input)
+            val frame = readControl()
             if (frame.command == MiPlayCommands.NOTIFY) continue
             check(predicate(frame)) { "MiPlay $stage returned unexpected command ${frame.describe()}" }
             return frame
@@ -452,7 +533,7 @@ internal class MiPlayControlConnection(
 
     private fun readSkippingNotify(stage: String): MiPlayCommandFrame {
         while (true) {
-            val frame = MiPlayCommandCodec.read(input)
+            val frame = readControl()
             if (frame.command != MiPlayCommands.NOTIFY) return frame
             report("MiPlay $stage 收到音箱通知")
         }
@@ -487,7 +568,7 @@ internal class MiPlayControlConnection(
             pendingAcknowledgement?.completion?.cancel()
             pendingAcknowledgement = null
         }
-        if (::output.isInitialized && !socket.isClosed) {
+        if (!useSecureControl && ::output.isInitialized && !socket.isClosed) {
             runCatching {
                 writeRuntime(MiPlayCommands.CLOSE)
             }
@@ -525,6 +606,12 @@ private fun decodeNotify(payload: ByteArray): String? {
     if ((payload[typeOffset].toInt() and 0xff) != 0x03) return label
     val value = payload[typeOffset + 1].toInt() and 0xff
     return "$label=$value"
+}
+
+private fun decodeSecureVolumeNotify(payload: ByteArray): Int? {
+    if (payload.size != 12 || payload[0] != 6.toByte() || payload[7] != 7.toByte() ||
+        payload.decodeToString(startIndex = 1, endIndex = 7) != "volume") return null
+    return ByteBuffer.wrap(payload, 8, 4).int.takeIf { it in 0..100 }
 }
 
 private fun decodeStatusScalar(payload: ByteArray): Int? {

@@ -1,43 +1,23 @@
 package com.suitius.dlnacast.service
 
-import android.content.Context
-import android.media.projection.MediaProjection
 import android.util.Log
 import com.suitius.dlnacast.audio.PcmFrameBuffer
 import com.suitius.dlnacast.audio.PcmAudioCapture
-import com.suitius.dlnacast.audio.PlaybackAudioCapture
-import com.suitius.dlnacast.audio.RootPlaybackAudioCapture
 import com.suitius.dlnacast.audio.AudioChannelRoute
 import com.suitius.dlnacast.audio.RoutedPcmOutput
+import com.suitius.dlnacast.audio.ShizukuPlaybackAudioCapture
 import com.suitius.dlnacast.model.DlnaRenderer
 import com.suitius.dlnacast.network.UpnpSoapClient
 import com.suitius.dlnacast.streaming.PcmWaveServer
 
 class ActiveCastSession(
-    context: Context,
     private val renderer: DlnaRenderer,
-    projection: MediaProjection?,
-    private val onProjectionStopped: () -> Unit,
-    matchingUid: Int? = null,
+    createCapture: (List<RoutedPcmOutput>) -> PcmAudioCapture,
     channelRoute: AudioChannelRoute = AudioChannelRoute.Stereo,
-    rootCapture: Boolean = false,
 ) : CastSession {
     private val frames = PcmFrameBuffer()
     private val soapClient = UpnpSoapClient()
-    private val capture: PcmAudioCapture = if (rootCapture) {
-        RootPlaybackAudioCapture(
-            context = context,
-            outputs = listOf(RoutedPcmOutput(frames, channelRoute)),
-        )
-    } else {
-        PlaybackAudioCapture(
-            context = context,
-            projection = requireNotNull(projection) { "MediaProjection capture requires a projection token" },
-            outputs = listOf(RoutedPcmOutput(frames, channelRoute)),
-            onProjectionStopped = onProjectionStopped,
-            matchingUid = matchingUid,
-        )
-    }
+    private val capture = createCapture(listOf(RoutedPcmOutput(frames, channelRoute)))
     private val server = PcmWaveServer.create(renderer.host, frames)
 
     override val bufferedMilliseconds: Int get() = frames.bufferedMilliseconds
@@ -48,6 +28,9 @@ class ActiveCastSession(
     override val supportsCaptureSwitch: Boolean get() = capture.supportsUidFilter
 
     override suspend fun setCaptureUid(uid: Int?) = capture.setMatchingUid(uid)
+    override suspend fun localSpeakerMuteState() = (capture as? ShizukuPlaybackAudioCapture)?.isSpeakerMuted()
+    override suspend fun setLocalSpeakerMuted(muted: Boolean) = (capture as? ShizukuPlaybackAudioCapture)
+        ?.setSpeakerMuted(muted) ?: super.setLocalSpeakerMuted(muted)
 
     override suspend fun start() {
         server.start()

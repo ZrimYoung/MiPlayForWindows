@@ -17,8 +17,14 @@ import androidx.core.app.ServiceCompat
 import com.suitius.dlnacast.MainActivity
 import com.suitius.dlnacast.R
 import com.suitius.dlnacast.audio.AudioChannelRoute
+import com.suitius.dlnacast.audio.PcmAudioCapture
+import com.suitius.dlnacast.audio.PlaybackAudioCapture
+import com.suitius.dlnacast.audio.RootPlaybackAudioCapture
+import com.suitius.dlnacast.audio.RoutedPcmOutput
+import com.suitius.dlnacast.audio.ShizukuPlaybackAudioCapture
 import com.suitius.dlnacast.miplay.MiPlayCastSession
 import com.suitius.dlnacast.model.DlnaRenderer
+import com.suitius.dlnacast.model.SpeakerIdentity
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -36,6 +42,7 @@ class CastService : Service() {
     private var session: CastSession? = null
     private var castingJob: Job? = null
     private var castWakeLock: PowerManager.WakeLock? = null
+    private var localSpeakerMuteError: String? = null
 
     override fun onCreate() {
         super.onCreate()
@@ -44,15 +51,20 @@ class CastService : Service() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
-            ACTION_START, ACTION_ROOT_START -> startCasting(intent)
+            ACTION_START, ACTION_ROOT_START, ACTION_SHIZUKU_START -> startCasting(intent)
             ACTION_STOP -> scope.launch { stopCasting(); stopSelf() }
             ACTION_PAUSE -> controlSession { it.pauseReceiver() }
             ACTION_RESUME -> controlSession { it.resumeReceiver() }
+            ACTION_SET_LOCAL_SPEAKER_MUTE -> setLocalSpeakerMute(intent.getBooleanExtra(EXTRA_MUTE_LOCAL_SPEAKER, false))
             ACTION_SET_VOLUME -> {
                 val volume = intent.getIntExtra(EXTRA_VOLUME, -1)
                 val receiverIndex = intent.getIntExtra(EXTRA_RECEIVER_INDEX, NO_RECEIVER_INDEX)
                     .takeUnless { it == NO_RECEIVER_INDEX }
-                if (volume in 0..100) controlSession { it.setReceiverVolume(volume, receiverIndex) }
+                val receiverIds = intent.getStringArrayListExtra(EXTRA_CONTROL_RENDERER_IDS)
+                if (volume in 0..100) {
+                    if (receiverIds.isNullOrEmpty()) controlSession { it.setReceiverVolume(volume, receiverIndex) }
+                    else controlMiPlaySession { it.setGroupVolume(volume, receiverIds.toSet()) }
+                }
             }
             ACTION_SET_CAPTURE_UID -> {
                 val uid = intent.getIntExtra(EXTRA_CAPTURE_UID, NO_CAPTURE_UID)
@@ -60,12 +72,12 @@ class CastService : Service() {
                 controlSession { it.setCaptureUid(uid) }
             }
             ACTION_ADD_RENDERER -> {
-                val renderer = intent.singleRendererOrNull() ?: return START_NOT_STICKY
-                controlMiPlaySession { it.addReceiver(renderer) }
+                val renderers = intent.renderers()
+                if (renderers.isNotEmpty()) controlMiPlaySession { it.addReceivers(renderers) }
             }
             ACTION_REMOVE_RENDERER -> {
-                val rendererId = intent.getStringExtra(EXTRA_SINGLE_RENDERER_ID) ?: return START_NOT_STICKY
-                controlMiPlaySession { it.removeReceiver(rendererId) }
+                val rendererIds = intent.getStringArrayListExtra(EXTRA_CONTROL_RENDERER_IDS).orEmpty().toSet()
+                if (rendererIds.isNotEmpty()) controlMiPlaySession { it.removeReceivers(rendererIds) }
             }
         }
         return START_NOT_STICKY
@@ -76,6 +88,9 @@ class CastService : Service() {
         val renderer = renderers.firstOrNull()
         val protocol = intent.protocolOrDefault()
         val rootCapture = intent.getBooleanExtra(EXTRA_ROOT_CAPTURE, false)
+        val shizukuCapture = intent.action == ACTION_SHIZUKU_START
+        val muteLocalSpeaker = shizukuCapture && intent.getBooleanExtra(EXTRA_MUTE_LOCAL_SPEAKER, false)
+        val requiresProjection = !rootCapture && !shizukuCapture
         val projectionData = intent.projectionDataOrNull()
         val captureUid = intent.getIntExtra(EXTRA_CAPTURE_UID, NO_CAPTURE_UID).takeUnless { it == NO_CAPTURE_UID }
         val channelRoutes = intent.channelRoutes(renderers.size)
@@ -85,7 +100,7 @@ class CastService : Service() {
             DEFAULT_PLAYBACK_DELAY_MICROSECONDS,
         ).coerceIn(0, MAXIMUM_PLAYBACK_DELAY_MICROSECONDS)
         val projectionResultCode = intent.getIntExtra(EXTRA_PROJECTION_RESULT_CODE, Int.MIN_VALUE)
-        if (renderer == null || (!rootCapture && (projectionData == null || projectionResultCode == Int.MIN_VALUE))) {
+        if (renderer == null || (requiresProjection && (projectionData == null || projectionResultCode == Int.MIN_VALUE))) {
             CastStateStore.update(CastStatus.Error("投送参数不完整，请返回应用后重试"))
             stopSelf()
             return
@@ -95,28 +110,31 @@ class CastService : Service() {
             this,
             NOTIFICATION_ID,
             buildNotification("正在连接 ${renderers.joinToString { it.name }}"),
-            if (rootCapture) {
-                ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK
-            } else {
+            if (requiresProjection) {
                 ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION
+            } else {
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK
             },
         )
         acquireCastWakeLock()
         CastStateStore.update(
-            CastStatus.Preparing(if (rootCapture) "正在启动 Root 系统内录…" else "正在准备系统音频捕获…"),
+            CastStatus.Preparing(when {
+                shizukuCapture -> "正在启动 Shizuku 音频捕获…"
+                rootCapture -> "正在启动 Root 系统内录…"
+                else -> "正在准备系统音频捕获…"
+            }),
         )
         castingJob?.cancel()
+        localSpeakerMuteError = null
         castingJob = scope.launch {
             var candidate: CastSession? = null
             try {
                 session?.let { withContext(Dispatchers.IO) { it.close() } }
-                val projection = if (rootCapture) {
-                    null
-                } else {
+                val projection = if (requiresProjection) {
                     val projectionManager = getSystemService(MediaProjectionManager::class.java)
                     projectionManager.getMediaProjection(projectionResultCode, projectionData!!)
                         ?: error("Android 未返回可用的录屏授权")
-                }
+                } else null
                 candidate = withContext(Dispatchers.IO) {
                     val projectionStopped: () -> Unit = {
                         scope.launch {
@@ -126,28 +144,33 @@ class CastService : Service() {
                         }
                         Unit
                     }
+                    val createCapture: (List<RoutedPcmOutput>) -> PcmAudioCapture = { outputs ->
+                        when {
+                            shizukuCapture -> ShizukuPlaybackAudioCapture(applicationContext, outputs, captureUid)
+                            rootCapture -> RootPlaybackAudioCapture(applicationContext, outputs)
+                            else -> PlaybackAudioCapture(
+                                applicationContext,
+                                requireNotNull(projection),
+                                outputs,
+                                projectionStopped,
+                                captureUid,
+                            )
+                        }
+                    }
                     when (protocol) {
                         CastProtocol.DLNA -> ActiveCastSession(
-                            applicationContext,
                             renderer,
-                            projection,
-                            projectionStopped,
-                            captureUid,
+                            createCapture,
                             channelRoute,
-                            rootCapture,
                         )
                         CastProtocol.MIPLAY -> MiPlayCastSession(
-                            applicationContext,
                             renderers,
-                            projection,
-                            projectionStopped,
-                            captureUid,
+                            createCapture,
                             channelRoutes,
                             playbackDelayMicroseconds,
-                            rootCapture,
                         ) { phase ->
                             scope.launch {
-                                CastStateStore.update(CastStatus.Preparing(phase))
+                                if (session == null) CastStateStore.update(CastStatus.Preparing(phase))
                                 updateNotification(phase)
                             }
                             Unit
@@ -156,26 +179,47 @@ class CastService : Service() {
                 }
                 val newSession = candidate
                 withContext(Dispatchers.IO) { newSession.start() }
+                if (muteLocalSpeaker) {
+                    localSpeakerMuteError = try {
+                        withContext(Dispatchers.IO) {
+                            if (newSession.setLocalSpeakerMuted(true)) null else "手机扬声器未能静音"
+                        }
+                    } catch (cancelled: CancellationException) {
+                        throw cancelled
+                    } catch (error: Exception) {
+                        error.message ?: "手机扬声器未能静音"
+                    }
+                }
                 session = newSession
                 val rendererNames = renderers.joinToString { it.name }
                 updateNotification("正在投送到 $rendererNames")
                 while (isActive && session === newSession) {
                     newSession.failureMessage?.let { error(it) }
                     Log.i(LOG_TAG, newSession.streamDetail)
+                    val controls = newSession.receiverControls
+                    val activeRenderers = (newSession as? MiPlayCastSession)?.activeRenderers ?: renderers
+                    val speakerMuted = withContext(Dispatchers.IO) {
+                        runCatching { newSession.localSpeakerMuteState() }.getOrNull()
+                    }
                     CastStateStore.update(
                         CastStatus.Streaming(
-                            rendererNames,
+                            activeRenderers.joinToString { it.name },
                             newSession.streamDetail,
                             newSession.supportsPlaybackControl,
                             newSession.receiverPaused,
                             newSession.receiverVolume,
-                            newSession.receiverControls,
+                            controls,
                             newSession.supportsCaptureSwitch,
+                            protocol,
+                            activeRenderers,
+                            channelRoutes.distinct().size > 1,
+                            localSpeakerMuted = speakerMuted,
+                            localSpeakerMuteError = localSpeakerMuteError,
                         ),
                     )
                     if (newSession.supportsPlaybackControl) {
                         updateNotification(
-                            "正在投送到 $rendererNames · ${if (newSession.receiverPaused) "已暂停" else "播放中"}",
+                            "正在投送到 ${activeRenderers.joinToString { it.name }} · ${if (newSession.receiverPaused) "已暂停" else "播放中"}",
                             newSession.receiverPaused,
                         )
                     }
@@ -206,6 +250,25 @@ class CastService : Service() {
             }
             runCatching { withContext(Dispatchers.IO) { operation(active) } }
                 .onFailure { CastStateStore.update(CastStatus.Error(it.message ?: "MiPlay 控制失败")) }
+        }
+    }
+
+    private fun setLocalSpeakerMute(muted: Boolean) {
+        scope.launch {
+            val active = session ?: return@launch
+            val result = runCatching { withContext(Dispatchers.IO) { active.setLocalSpeakerMuted(muted) } }
+            if (session !== active) return@launch
+            val actual = result.getOrNull()
+            localSpeakerMuteError = when {
+                actual == muted -> null
+                else -> result.exceptionOrNull()?.message ?: "手机扬声器静音状态未能更改"
+            }
+            if (actual == muted) CastPreferences(this@CastService).saveLocalSpeakerMute(muted)
+            val state = CastStateStore.status.value as? CastStatus.Streaming ?: return@launch
+            CastStateStore.update(state.copy(
+                localSpeakerMuted = actual ?: state.localSpeakerMuted,
+                localSpeakerMuteError = localSpeakerMuteError,
+            ))
         }
     }
 
@@ -315,6 +378,11 @@ class CastService : Service() {
         val transports = getStringArrayListExtra(EXTRA_RENDERER_AV_TRANSPORT).orEmpty()
         val renderingControls = getStringArrayListExtra(EXTRA_RENDERER_RENDERING_CONTROL).orEmpty()
         val connectionManagers = getStringArrayListExtra(EXTRA_RENDERER_CONNECTION_MANAGER).orEmpty()
+        val groupIds = getStringArrayListExtra(EXTRA_RENDERER_GROUP_ID).orEmpty()
+        val groupNames = getStringArrayListExtra(EXTRA_RENDERER_GROUP_NAME).orEmpty()
+        val channels = getStringArrayListExtra(EXTRA_RENDERER_CHANNEL).orEmpty()
+        val controlPorts = getIntArrayExtra(EXTRA_RENDERER_CONTROL_PORT)
+        val secureMiPlay = getBooleanArrayExtra(EXTRA_RENDERER_SECURE_MIPLAY)
         if (listOf(names, descriptions, hosts, transports, renderingControls, connectionManagers).any { it.size != ids.size }) {
             return emptyList()
         }
@@ -327,6 +395,14 @@ class CastService : Service() {
                 transports[index],
                 renderingControls[index].ifEmpty { null },
                 connectionManagers[index].ifEmpty { null },
+                supportsMiPlay = protocolOrDefault() == CastProtocol.MIPLAY,
+                miPlayControlPort = controlPorts?.getOrNull(index)?.takeIf { it in 1..65535 },
+                usesSecureMiPlay = secureMiPlay?.getOrNull(index) == true,
+                miPlayIdentity = groupIds.getOrNull(index)?.takeIf(String::isNotBlank)?.let { group ->
+                    SpeakerIdentity(name = names[index], groupId = group,
+                        groupName = groupNames.getOrNull(index).orEmpty(), channel = channels.getOrNull(index).orEmpty(),
+                        hasGroupInfo = true)
+                },
             )
         }
     }
@@ -341,6 +417,8 @@ class CastService : Service() {
     companion object {
         private const val ACTION_START = "com.suitius.dlnacast.action.START"
         private const val ACTION_ROOT_START = "com.suitius.dlnacast.action.ROOT_START"
+        private const val ACTION_SHIZUKU_START = "com.suitius.dlnacast.action.SHIZUKU_START"
+        private const val ACTION_SET_LOCAL_SPEAKER_MUTE = "com.suitius.dlnacast.action.SET_LOCAL_SPEAKER_MUTE"
         private const val ACTION_STOP = "com.suitius.dlnacast.action.STOP"
         private const val ACTION_PAUSE = "com.suitius.dlnacast.action.PAUSE"
         private const val ACTION_RESUME = "com.suitius.dlnacast.action.RESUME"
@@ -351,6 +429,7 @@ class CastService : Service() {
         private const val EXTRA_VOLUME = "receiver_volume"
         private const val EXTRA_RECEIVER_INDEX = "receiver_index"
         private const val EXTRA_CAPTURE_UID = "capture_uid"
+        private const val EXTRA_MUTE_LOCAL_SPEAKER = "mute_local_speaker"
         private const val EXTRA_CHANNEL_ROUTE = "channel_route"
         private const val EXTRA_PLAYBACK_DELAY_MICROSECONDS = "playback_delay_microseconds"
         private const val NO_CAPTURE_UID = -1
@@ -370,9 +449,12 @@ class CastService : Service() {
         private const val EXTRA_RENDERER_RENDERING_CONTROL = "renderer_rendering_control"
         private const val EXTRA_RENDERER_CONNECTION_MANAGER = "renderer_connection_manager"
         private const val EXTRA_PROTOCOL = "cast_protocol"
-        private const val EXTRA_SINGLE_RENDERER_ID = "single_renderer_id"
-        private const val EXTRA_SINGLE_RENDERER_NAME = "single_renderer_name"
-        private const val EXTRA_SINGLE_RENDERER_HOST = "single_renderer_host"
+        private const val EXTRA_RENDERER_GROUP_ID = "renderer_group_id"
+        private const val EXTRA_RENDERER_GROUP_NAME = "renderer_group_name"
+        private const val EXTRA_RENDERER_CHANNEL = "renderer_channel"
+        private const val EXTRA_RENDERER_CONTROL_PORT = "renderer_control_port"
+        private const val EXTRA_RENDERER_SECURE_MIPLAY = "renderer_secure_miplay"
+        private const val EXTRA_CONTROL_RENDERER_IDS = "control_renderer_ids"
         private const val CHANNEL_ID = "cast-session"
         private const val NOTIFICATION_ID = 1001
         private const val LOG_TAG = "DLNACast.Cast"
@@ -386,28 +468,56 @@ class CastService : Service() {
             captureUid: Int? = null,
             channelRoutes: List<AudioChannelRoute> = List(renderers.size) { AudioChannelRoute.Stereo },
             playbackDelayMicroseconds: Int = DEFAULT_PLAYBACK_DELAY_MICROSECONDS,
+        ) = captureStartIntent(
+            context, ACTION_START, renderers, protocol, captureUid, channelRoutes, playbackDelayMicroseconds,
+        ).apply {
+            putExtra(EXTRA_PROJECTION_RESULT_CODE, projectionResultCode)
+            putExtra(EXTRA_PROJECTION_DATA, projectionData)
+        }
+
+        fun rootStartIntent(
+            context: Context,
+            renderers: List<DlnaRenderer>,
+            protocol: CastProtocol = CastProtocol.MIPLAY,
+            channelRoutes: List<AudioChannelRoute> = List(renderers.size) { AudioChannelRoute.Stereo },
+            playbackDelayMicroseconds: Int = DEFAULT_PLAYBACK_DELAY_MICROSECONDS,
+        ) = captureStartIntent(
+            context, ACTION_ROOT_START, renderers, protocol, null, channelRoutes, playbackDelayMicroseconds,
+        ).apply { putExtra(EXTRA_ROOT_CAPTURE, true) }
+
+        fun shizukuStartIntent(
+            context: Context,
+            renderers: List<DlnaRenderer>,
+            protocol: CastProtocol,
+            captureUid: Int?,
+            channelRoutes: List<AudioChannelRoute>,
+            playbackDelayMicroseconds: Int,
+            muteLocalSpeaker: Boolean,
+        ) = captureStartIntent(
+            context, ACTION_SHIZUKU_START, renderers, protocol, captureUid, channelRoutes, playbackDelayMicroseconds,
+        ).apply { putExtra(EXTRA_MUTE_LOCAL_SPEAKER, muteLocalSpeaker) }
+
+        fun setLocalSpeakerMuteIntent(context: Context, muted: Boolean) = Intent(context, CastService::class.java).apply {
+            action = ACTION_SET_LOCAL_SPEAKER_MUTE
+            putExtra(EXTRA_MUTE_LOCAL_SPEAKER, muted)
+        }
+
+        private fun captureStartIntent(
+            context: Context,
+            startAction: String,
+            renderers: List<DlnaRenderer>,
+            protocol: CastProtocol,
+            captureUid: Int?,
+            channelRoutes: List<AudioChannelRoute>,
+            playbackDelayMicroseconds: Int,
         ) = Intent(context, CastService::class.java).apply {
             require(renderers.isNotEmpty()) { "至少选择一台音箱" }
             require(renderers.size <= if (protocol == CastProtocol.MIPLAY) MAX_MIPLAY_RECEIVERS else MAX_DLNA_RECEIVERS) {
                 "${protocol.name} 超过可选音箱数量上限"
             }
             require(channelRoutes.size == renderers.size) { "音箱数量和声道路由数量不一致" }
-            action = ACTION_START
-            putExtra(EXTRA_PROJECTION_RESULT_CODE, projectionResultCode)
-            putExtra(EXTRA_PROJECTION_DATA, projectionData)
-            putStringArrayListExtra(EXTRA_RENDERER_ID, ArrayList(renderers.map { it.id }))
-            putStringArrayListExtra(EXTRA_RENDERER_NAME, ArrayList(renderers.map { it.name }))
-            putStringArrayListExtra(EXTRA_RENDERER_DESCRIPTION_URL, ArrayList(renderers.map { it.descriptionUrl }))
-            putStringArrayListExtra(EXTRA_RENDERER_HOST, ArrayList(renderers.map { it.host }))
-            putStringArrayListExtra(EXTRA_RENDERER_AV_TRANSPORT, ArrayList(renderers.map { it.avTransportControlUrl }))
-            putStringArrayListExtra(
-                EXTRA_RENDERER_RENDERING_CONTROL,
-                ArrayList(renderers.map { it.renderingControlUrl.orEmpty() }),
-            )
-            putStringArrayListExtra(
-                EXTRA_RENDERER_CONNECTION_MANAGER,
-                ArrayList(renderers.map { it.connectionManagerControlUrl.orEmpty() }),
-            )
+            action = startAction
+            putRenderers(renderers)
             putExtra(EXTRA_PROTOCOL, protocol.name)
             captureUid?.let { putExtra(EXTRA_CAPTURE_UID, it) }
             putStringArrayListExtra(EXTRA_CHANNEL_ROUTE, ArrayList(channelRoutes.map { it.name }))
@@ -417,20 +527,7 @@ class CastService : Service() {
             )
         }
 
-        fun rootStartIntent(
-            context: Context,
-            renderers: List<DlnaRenderer>,
-            protocol: CastProtocol = CastProtocol.MIPLAY,
-            channelRoutes: List<AudioChannelRoute> = List(renderers.size) { AudioChannelRoute.Stereo },
-            playbackDelayMicroseconds: Int = DEFAULT_PLAYBACK_DELAY_MICROSECONDS,
-        ) = Intent(context, CastService::class.java).apply {
-            require(renderers.isNotEmpty()) { "至少选择一台音箱" }
-            require(renderers.size <= if (protocol == CastProtocol.MIPLAY) MAX_MIPLAY_RECEIVERS else MAX_DLNA_RECEIVERS) {
-                "${protocol.name} 超过可选音箱数量上限"
-            }
-            require(channelRoutes.size == renderers.size) { "音箱数量和声道路由数量不一致" }
-            action = ACTION_ROOT_START
-            putExtra(EXTRA_ROOT_CAPTURE, true)
+        private fun Intent.putRenderers(renderers: List<DlnaRenderer>) {
             putStringArrayListExtra(EXTRA_RENDERER_ID, ArrayList(renderers.map { it.id }))
             putStringArrayListExtra(EXTRA_RENDERER_NAME, ArrayList(renderers.map { it.name }))
             putStringArrayListExtra(EXTRA_RENDERER_DESCRIPTION_URL, ArrayList(renderers.map { it.descriptionUrl }))
@@ -444,12 +541,11 @@ class CastService : Service() {
                 EXTRA_RENDERER_CONNECTION_MANAGER,
                 ArrayList(renderers.map { it.connectionManagerControlUrl.orEmpty() }),
             )
-            putExtra(EXTRA_PROTOCOL, protocol.name)
-            putStringArrayListExtra(EXTRA_CHANNEL_ROUTE, ArrayList(channelRoutes.map { it.name }))
-            putExtra(
-                EXTRA_PLAYBACK_DELAY_MICROSECONDS,
-                playbackDelayMicroseconds.coerceIn(0, MAXIMUM_PLAYBACK_DELAY_MICROSECONDS),
-            )
+            putStringArrayListExtra(EXTRA_RENDERER_GROUP_ID, ArrayList(renderers.map { it.miPlayIdentity?.groupId.orEmpty() }))
+            putStringArrayListExtra(EXTRA_RENDERER_GROUP_NAME, ArrayList(renderers.map { it.miPlayIdentity?.groupName.orEmpty() }))
+            putStringArrayListExtra(EXTRA_RENDERER_CHANNEL, ArrayList(renderers.map { it.miPlayIdentity?.channel.orEmpty() }))
+            putExtra(EXTRA_RENDERER_CONTROL_PORT, IntArray(renderers.size) { renderers[it].miPlayControlPort ?: 0 })
+            putExtra(EXTRA_RENDERER_SECURE_MIPLAY, BooleanArray(renderers.size) { renderers[it].usesSecureMiPlay })
         }
 
         fun stopIntent(context: Context) = Intent(context, CastService::class.java).apply { action = ACTION_STOP }
@@ -471,18 +567,23 @@ class CastService : Service() {
                 putExtra(EXTRA_CAPTURE_UID, captureUid ?: NO_CAPTURE_UID)
             }
 
-        fun addRendererIntent(context: Context, renderer: DlnaRenderer) =
+        fun setGroupVolumeIntent(context: Context, volume: Int, rendererIds: List<String>) =
+            setVolumeIntent(context, volume).putStringArrayListExtra(EXTRA_CONTROL_RENDERER_IDS, ArrayList(rendererIds))
+
+        fun addRendererIntent(context: Context, renderer: DlnaRenderer) = addRenderersIntent(context, listOf(renderer))
+
+        internal fun addRenderersIntent(context: Context, renderers: List<DlnaRenderer>) =
             Intent(context, CastService::class.java).apply {
                 action = ACTION_ADD_RENDERER
-                putExtra(EXTRA_SINGLE_RENDERER_ID, renderer.id)
-                putExtra(EXTRA_SINGLE_RENDERER_NAME, renderer.name)
-                putExtra(EXTRA_SINGLE_RENDERER_HOST, renderer.host)
+                putRenderers(renderers)
             }
 
-        fun removeRendererIntent(context: Context, rendererId: String) =
+        fun removeRendererIntent(context: Context, rendererId: String) = removeRenderersIntent(context, listOf(rendererId))
+
+        internal fun removeRenderersIntent(context: Context, rendererIds: List<String>) =
             Intent(context, CastService::class.java).apply {
                 action = ACTION_REMOVE_RENDERER
-                putExtra(EXTRA_SINGLE_RENDERER_ID, rendererId)
+                putStringArrayListExtra(EXTRA_CONTROL_RENDERER_IDS, ArrayList(rendererIds))
             }
     }
 
@@ -498,10 +599,4 @@ class CastService : Service() {
             ?: List(rendererCount) { AudioChannelRoute.Stereo }
     }
 
-    private fun Intent.singleRendererOrNull(): DlnaRenderer? {
-        val id = getStringExtra(EXTRA_SINGLE_RENDERER_ID) ?: return null
-        val name = getStringExtra(EXTRA_SINGLE_RENDERER_NAME) ?: return null
-        val host = getStringExtra(EXTRA_SINGLE_RENDERER_HOST) ?: return null
-        return DlnaRenderer(id, name, "miplay://$host", host, "", null, null)
-    }
 }

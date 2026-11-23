@@ -14,6 +14,7 @@ import java.net.InetAddress
 import java.net.InetSocketAddress
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
+import java.util.Locale
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
@@ -38,7 +39,9 @@ class MiPlayMdnsDiscovery(context: Context) {
                         .getOrDefault(emptyList())
                 }
             }.awaitAll().flatten()
-        }.distinctBy { it.host }
+        }.groupBy(DlnaRenderer::host).values.map { advertisements ->
+            advertisements.maxBy(::advertisementQuality)
+        }
     }
 
     private fun search(binding: Binding, timeoutMillis: Long): List<DlnaRenderer> {
@@ -68,7 +71,15 @@ class MiPlayMdnsDiscovery(context: Context) {
                             service,
                             response.address,
                         ).forEach { device ->
-                            device.address?.hostAddress?.let { found[it] = device }
+                            val key = device.instanceName.lowercase(Locale.ROOT)
+                            val previous = found[key]
+                            val txt = previous?.txt.orEmpty() + device.txt
+                            found[key] = device.copy(
+                                friendlyName = txt["name"]?.takeIf(String::isNotBlank) ?: device.friendlyName,
+                                address = device.resolvedAddress ?: previous?.resolvedAddress ?: device.address ?: previous?.address,
+                                txt = txt,
+                                resolvedAddress = device.resolvedAddress ?: previous?.resolvedAddress,
+                            )
                         }
                     }
                 } catch (_: java.net.SocketTimeoutException) {
@@ -76,17 +87,8 @@ class MiPlayMdnsDiscovery(context: Context) {
                 }
             }
         }
-        return found.values.mapNotNull { device ->
-            val host = device.address?.hostAddress ?: return@mapNotNull null
-            DlnaRenderer(
-                id = "miplay://${device.instanceName}",
-                name = device.friendlyName,
-                descriptionUrl = "miplay://$host",
-                host = host,
-                avTransportControlUrl = "",
-                renderingControlUrl = null,
-                connectionManagerControlUrl = null,
-            )
+        return found.values.mapNotNull(MiPlayMdnsDevice::toReceiver).groupBy(DlnaRenderer::host).values.map { advertisements ->
+            advertisements.maxBy(::advertisementQuality)
         }
     }
 
@@ -116,6 +118,8 @@ internal data class MiPlayMdnsDevice(
     val instanceName: String,
     val friendlyName: String,
     val address: InetAddress?,
+    val txt: Map<String, String> = emptyMap(),
+    val resolvedAddress: InetAddress? = null,
 )
 
 internal fun createQuery(serviceName: String): ByteArray = ByteArrayOutputStream().use { output ->
@@ -149,11 +153,11 @@ internal fun parseMdns(
         }
         val instances = linkedSetOf<String>()
         val services = linkedMapOf<String, Pair<String, Int>>()
-        val names = linkedMapOf<String, String>()
+        val txtRecords = linkedMapOf<String, Map<String, String>>()
         val addresses = linkedMapOf<String, InetAddress>()
         repeat(records) {
             val ownerResult = readName(packet, offset)
-            val owner = ownerResult.first
+            val owner = ownerResult.first.lowercase(Locale.ROOT)
             offset = ownerResult.second
             require(offset + 10 <= packet.size)
             val type = readUnsignedShort(packet, offset)
@@ -165,16 +169,16 @@ internal fun parseMdns(
                 1 -> if (length == 4) addresses[owner] = InetAddress.getByAddress(packet.copyOfRange(offset, end))
                 12 -> {
                     val instance = readName(packet, offset).first
-                    if (owner.equals(serviceName, true)) instances += instance
+                    if (owner.equals(serviceName, true)) instances += instance.lowercase(Locale.ROOT)
                 }
                 16 -> {
-                    parseTxtName(packet, offset, end)?.let { names[owner] = it }
+                    txtRecords[owner] = parseTxt(packet, offset, end)
                     instances += owner
                 }
                 33 -> if (length >= 6) {
                     val port = readUnsignedShort(packet, offset + 4)
                     val target = readName(packet, offset + 6).first
-                    services[owner] = target to port
+                    services[owner] = target.lowercase(Locale.ROOT) to port
                     instances += owner
                 }
             }
@@ -183,10 +187,14 @@ internal fun parseMdns(
         val suffix = ".$serviceName"
         instances.filter { it.endsWith(suffix, true) }.map { instance ->
             val target = services[instance]?.first
+            val txt = txtRecords[instance].orEmpty()
+            val resolved = target?.let(addresses::get)
             MiPlayMdnsDevice(
                 instance,
-                names[instance]?.takeIf(String::isNotBlank) ?: instance.dropLast(suffix.length),
-                target?.let(addresses::get) ?: sourceAddress,
+                txt["name"]?.takeIf(String::isNotBlank) ?: instance.dropLast(suffix.length),
+                resolved ?: sourceAddress,
+                txt,
+                resolved,
             )
         }
     }.getOrDefault(emptyList())
@@ -214,16 +222,17 @@ private fun readName(packet: ByteArray, start: Int): Pair<String, Int> {
     }
 }
 
-private fun parseTxtName(packet: ByteArray, start: Int, end: Int): String? {
+private fun parseTxt(packet: ByteArray, start: Int, end: Int): Map<String, String> {
+    val fields = mutableMapOf<String, String>()
     var offset = start
     while (offset < end) {
         val length = packet[offset++].toInt() and 0xff
         require(offset + length <= end)
         val value = packet.copyOfRange(offset, offset + length).toString(Charsets.UTF_8)
         offset += length
-        if (value.startsWith("name=", true)) return value.substringAfter('=')
+        fields[value.substringBefore('=').lowercase(Locale.ROOT)] = value.substringAfter('=', "")
     }
-    return null
+    return fields
 }
 
 private fun readUnsignedShort(packet: ByteArray, offset: Int): Int =

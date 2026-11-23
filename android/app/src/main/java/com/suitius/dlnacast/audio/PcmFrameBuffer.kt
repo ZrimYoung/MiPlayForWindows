@@ -99,6 +99,12 @@ class PcmFrameBuffer(
         while (frames.size > targetFrames) frames.poll()
     }
 
+    @Synchronized
+    fun discardPendingAudio() {
+        frames.clear()
+        pendingCount = 0
+    }
+
     override fun close() {
         closed.set(true)
         frames.clear()

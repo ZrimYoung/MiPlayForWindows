@@ -12,6 +12,7 @@ import android.os.Handler
 import android.os.Looper
 import androidx.core.content.ContextCompat
 import java.util.concurrent.atomic.AtomicBoolean
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -40,12 +41,14 @@ class PlaybackAudioCapture(
     }
     private val scope = CoroutineScope(Job() + Dispatchers.IO)
     private val closed = AtomicBoolean(false)
-    private var audioRecord: AudioRecord? = null
+    @Volatile private var audioRecord: AudioRecord? = null
     private var recordJob: Job? = null
     @Volatile private var activeMatchingUid: Int? = matchingUid
     private var callbackRegistered = false
 
     override val supportsUidFilter: Boolean = true
+    @Volatile override var failureMessage: String? = null
+        private set
 
     private val projectionCallback = object : MediaProjection.Callback() {
         override fun onStop() {
@@ -100,23 +103,37 @@ class PlaybackAudioCapture(
             .setBufferSizeInBytes(maxOf(minimumBuffer, PcmFrameBuffer.FRAME_BYTES * 4))
             .setAudioPlaybackCaptureConfig(captureConfig)
             .build()
-        check(record.state == AudioRecord.STATE_INITIALIZED) { "Android playback capture could not be initialized" }
+        try {
+            check(record.state == AudioRecord.STATE_INITIALIZED) { "Android 无法初始化播放音频捕获" }
+            record.startRecording()
+        } catch (exception: Exception) {
+            record.release()
+            throw exception
+        }
         audioRecord = record
-        record.startRecording()
+        failureMessage = null
         recordJob = scope.launch {
-            val frame = ByteArray(PcmFrameBuffer.FRAME_BYTES)
-            while (isActive && !closed.get()) {
-                val read = record.read(frame, 0, frame.size, AudioRecord.READ_BLOCKING)
-                when {
-                    read > 0 -> {
-                        val captured = frame.copyOf(read)
-                        outputs.forEach { target ->
-                            target.buffer.offer(target.route.applyToStereoPcm16(captured))
+            try {
+                val frame = ByteArray(PcmFrameBuffer.FRAME_BYTES)
+                while (isActive && !closed.get()) {
+                    val read = record.read(frame, 0, frame.size, AudioRecord.READ_BLOCKING)
+                    when {
+                        read > 0 -> {
+                            val captured = frame.copyOf(read)
+                            outputs.forEach { target ->
+                                target.buffer.offer(target.route.applyToStereoPcm16(captured))
+                            }
                         }
+                        read < 0 && isActive && !closed.get() && audioRecord === record ->
+                            error("Android 已中断播放音频捕获（$read）")
+                        read < 0 -> break
                     }
-                    read == AudioRecord.ERROR_DEAD_OBJECT -> break
-                    read < 0 && isActive -> error("AudioRecord.read failed with code $read")
                 }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (exception: Exception) {
+                if (!closed.get() && audioRecord === record) failureMessage =
+                    exception.message ?: "Android 已中断播放音频捕获"
             }
         }
     }

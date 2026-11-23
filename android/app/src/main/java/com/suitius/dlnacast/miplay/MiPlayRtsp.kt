@@ -38,6 +38,7 @@ internal class MiPlayRtspServer(
     private val timerPort: Int,
     private val playbackDelayMicroseconds: Int,
     private val sharedTimeOffsetProvider: (suspend () -> Long)? = null,
+    private val fusionPlay: Boolean = false,
     private val report: (String) -> Unit,
 ) : AutoCloseable {
     private val sessionId = Random.nextInt(100_000_000, 1_000_000_000).toString()
@@ -71,7 +72,12 @@ internal class MiPlayRtspServer(
         val capabilities = readRtspMessage(input)
         checkOk(capabilities, 2, "capabilities")
         val capabilityBody = capabilities.body.toString(Charsets.US_ASCII)
-        check(capabilityBody.contains("wfd_audio_codecs: AAC 00000001 00")) {
+        val supportsAac = if (fusionPlay) {
+            capabilityBody.lineSequence().any { it.trim() == "wfd_audio_codecs_v2: 15 3 3" }
+        } else {
+            capabilityBody.contains("wfd_audio_codecs: AAC 00000001 00")
+        }
+        check(supportsAac) {
             "Speaker does not advertise the validated AAC WFD profile"
         }
 
@@ -114,7 +120,9 @@ internal class MiPlayRtspServer(
                 message.startLine.startsWith("GET_PARAMETER ") -> send(genericResponse(cseq))
                 message.startLine.startsWith("SET_PARAMETER ") &&
                     message.body.toString(Charsets.US_ASCII).contains("wfd_idr_request") -> send(genericResponse(cseq))
-                message.startLine.startsWith("VIDEO_LATENCY ") -> Unit
+                message.startLine.startsWith("VIDEO_LATENCY ") -> {
+                    if (fusionPlay) send(genericResponse(cseq))
+                }
                 message.startLine.startsWith("RTSP/") -> Unit
                 else -> error("Unsupported RTSP runtime request: ${message.startLine}")
             }
@@ -150,9 +158,11 @@ internal class MiPlayRtspServer(
     }
 
     private fun capabilityQuery(): ByteArray {
+        // FusionPlay opens both reverse media sockets in response to the version 2 query.
+        val audioCodecs = if (fusionPlay) "wfd_audio_codecs_v2" else "wfd_audio_codecs"
         val body = (
             "wfd_video_formats\r\n" +
-                "wfd_audio_codecs\r\n" +
+                "$audioCodecs\r\n" +
                 "wfd_client_rtp_ports\r\n" +
                 "wfd_tcp_enable\r\n" +
                 "wfd_tcp_multi_session_enable\r\n" +
@@ -284,7 +294,7 @@ private fun encodeRtsp(
     return builder.toString().toByteArray(Charsets.US_ASCII) + body
 }
 
-private fun readRtspMessage(input: BufferedInputStream): RtspMessage {
+internal fun readRtspMessage(input: BufferedInputStream): RtspMessage {
     val headerBytes = ByteArrayOutputStream(1024)
     var matched = 0
     val terminator = byteArrayOf(13, 10, 13, 10)

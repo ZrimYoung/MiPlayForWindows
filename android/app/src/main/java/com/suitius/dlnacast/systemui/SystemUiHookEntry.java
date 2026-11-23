@@ -934,11 +934,13 @@ public final class SystemUiHookEntry extends XposedModule {
 
     private static void launchSelection(Context context, Speaker speaker) {
         try {
+            Bundle prepared = context.getContentResolver().call(
+                    SPEAKERS_URI, METHOD_PREPARE_SELECTION, speaker.id, null);
+            String nonce = prepared == null ? null : prepared.getString(KEY_NONCE);
+            if (nonce == null) return;
             Intent intent = new Intent(ACTION_SELECTION)
                     .setComponent(new ComponentName(APP_PACKAGE, APP_ACTIVITY))
-                    .putExtra(EXTRA_RENDERER_ID, speaker.id)
-                    .putExtra(EXTRA_RENDERER_NAME, speaker.name)
-                    .putExtra(EXTRA_RENDERER_HOST, speaker.host)
+                    .putExtra(EXTRA_NONCE, nonce)
                     .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK
                             | Intent.FLAG_ACTIVITY_SINGLE_TOP
                             | Intent.FLAG_ACTIVITY_CLEAR_TOP);
