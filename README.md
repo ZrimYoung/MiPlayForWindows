@@ -1,5 +1,23 @@
 # MiPlay Cast
 
+## 本 fork：Windows / macOS 桌面测试版
+
+0.6 桌面测试版支持多台妙播音箱、官方立体声组合、实时延迟与音量、系统/固定输出/单应用音源，以及可选 DLNA 投放。
+Mac 使用 SwiftUI 原生界面与菜单栏，提供 Apple Music 同步歌词与高清封面；Windows 使用 Avalonia 设备卡片。Mac 支持捕获并静音所选源（实验）。
+MiPlay 共享协议核心继续使用 C#，旧版 WinUI 程序保留作回归对照。新能力的真机验证边界见下方文档。
+
+0.6.3 的 Mac 采集层先保留系统实际交付的 PCM 格式与声道，发送适配器再转换为现有双声道路径；新增事件唤醒和明确的下混策略。最多32声道、不同采样精度的检查使用合成数据，不代表播放器已经输出多声道或接收端多声道投放已经验收。
+
+- 开发与打包：[desktop-development.md](docs/desktop-development.md)
+- 验证边界和目标设备：[desktop-validation.md](docs/desktop-validation.md)
+- Mac 原生测试包：`python3 scripts/package-desktop.py macos`
+- Windows 界面入口：`dotnet run --project src/MiPlay.Desktop/MiPlay.Desktop.csproj`
+
+当前为个人测试版本。用户已反馈上一版可听，详细型号／固件尚待登记；本次多音箱、延迟与静音的实际效果仍需真机验证。
+上游主程序复用授权待确认，本 fork 未自行添加覆盖继承代码的许可证。
+
+## 上游 Windows 版本说明
+
 把 Windows 正在播放的声音投到局域网音箱。
 
 项目同时支持普通 DLNA 音箱和小米音箱的 MiPlay 音频路径。DLNA 的兼容面更广，MiPlay 的延迟通常更低，但也更依赖具体型号和固件。它目前仍是一个面向自用和实验的 Windows 工具，不是通用投屏 SDK。

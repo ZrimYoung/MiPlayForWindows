@@ -1,0 +1,25 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <TargetFramework Condition="'$(DesktopPlatform)' == 'Windows' or $([MSBuild]::IsOSPlatform('Windows'))">net10.0-windows10.0.22000.0</TargetFramework>
+    <EnableWindowsTargeting>true</EnableWindowsTargeting>
+    <AvaloniaUseCompiledBindingsByDefault>true</AvaloniaUseCompiledBindingsByDefault>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <Version>0.4.0</Version>
+    <AssemblyName>MiPlay.Desktop</AssemblyName>
+    <DefineConstants Condition="'$(TargetFramework)' == 'net10.0-windows10.0.22000.0'">$(DefineConstants);WINDOWS_DESKTOP</DefineConstants>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Avalonia" Version="12.1.6" />
+    <PackageReference Include="Avalonia.Desktop" Version="12.1.6" />
+    <PackageReference Include="Avalonia.Themes.Fluent" Version="12.1.6" />
+    <ProjectReference Include="../MiPlay.Core/MiPlay.Core.csproj" />
+    <ProjectReference Include="../MiPlay.Platform.Mac/MiPlay.Platform.Mac.csproj" />
+    <ProjectReference Include="../MiPlay.Platform.Windows/MiPlay.Platform.Windows.csproj" Condition="'$(TargetFramework)' == 'net10.0-windows10.0.22000.0'" />
+    <AvaloniaResource Include="Assets/**" />
+  </ItemGroup>
+  <Target Name="BuildMacAudioBridge" BeforeTargets="Build" Condition="$([MSBuild]::IsOSPlatform('OSX')) and '$(DesktopPlatform)' != 'Windows'">
+    <Exec Command="bash &quot;$(MSBuildProjectDirectory)/../../native/macos/build.sh&quot; &quot;$(TargetDir)&quot;" />
+  </Target>
+</Project>

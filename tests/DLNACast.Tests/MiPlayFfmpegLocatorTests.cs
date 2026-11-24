@@ -40,7 +40,7 @@ public sealed class MiPlayFfmpegLocatorTests
 
     private static string Touch(string directory)
     {
-        var path = Path.Combine(directory, "ffmpeg.exe");
+        var path = Path.Combine(directory, OperatingSystem.IsWindows() ? "ffmpeg.exe" : "ffmpeg");
         File.WriteAllBytes(path, [0x4d, 0x5a]);
         return path;
     }

@@ -10,7 +10,7 @@ namespace DLNACast.Core.MiPlay;
 /// timer. Unlike Task.Delay, the timer is not rounded to the ordinary system
 /// timer period after a long-running app becomes idle or backgrounded.
 /// </summary>
-internal sealed class MiPlayMediaPacingClock : IDisposable
+public sealed class MiPlayMediaPacingClock : DLNACast.Core.Abstractions.IMediaPacingClock
 {
     private const uint CreateWaitableTimerHighResolution = 0x0000_0002;
     private const uint TimerModifyState = 0x0000_0002;

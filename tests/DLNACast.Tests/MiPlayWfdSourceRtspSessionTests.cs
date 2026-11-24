@@ -11,6 +11,35 @@ public sealed class MiPlayWfdSourceRtspSessionTests
         new(2026, 8, 7, 6, 12, 43, TimeSpan.Zero);
     private static readonly DateTimeOffset Second44 = Second43.AddSeconds(1);
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task LiveDelayWritesOnlyTimeOffsetAndRetainsReadySession(bool waitForAck)
+    {
+        var session = CreatePendingTimeOffsetSession(false, waitForAck);
+        Assert.True(session.MarkInitialTimeOffsetSent().Ready);
+        var control = new MiPlayRuntimeTimeOffsetControl(waitForAck, 1_000_000);
+        var sequence = 6;
+        foreach (var target in new[] { 400_000, 1_500_000, 1_000_000 })
+        {
+            var completion = control.SetPlaybackDelayAsync(target, CancellationToken.None);
+            Assert.True(control.TryRead(out var request)); Assert.True(request.TryStart());
+            var offset = control.Resolve(request, session.TimeOffsetMicroseconds!.Value);
+            var transition = session.PrepareRuntimeTimeOffset(Second44, offset);
+            Assert.True(transition.Accepted);
+            var wire = Assert.Single(transition.OutboundMessages);
+            Assert.True(MiPlayRtspWireMessageCodec.TryDecode(wire, out var message, out var used));
+            Assert.Equal(wire.Length, used);
+            Assert.Equal(target.ToString(), message!.GetHeader("TimeOffset"));
+            Assert.Equal(sequence.ToString(), message.GetHeader("CSeq"));
+            Assert.True(session.MarkRuntimeTimeOffsetSent().Accepted);
+            if (waitForAck) Assert.True(session.ProcessInbound(Response(sequence), Second44, 2_000_000).Accepted);
+            request.Succeed(); await completion;
+            Assert.Equal(MiPlayWfdSourceRtspPhase.Ready, session.Phase);
+            sequence++;
+        }
+    }
+
     [Fact]
     public void ReplaysCapturedSixteenStepHandshakeToReadyWithoutSockets()
     {

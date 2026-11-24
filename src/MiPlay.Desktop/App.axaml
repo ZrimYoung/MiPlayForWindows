@@ -1,0 +1,18 @@
+<Application xmlns="https://github.com/avaloniaui" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             x:Class="MiPlay.Desktop.App" RequestedThemeVariant="Light" Name="MiPlay Desktop">
+  <Application.Styles><FluentTheme /></Application.Styles>
+  <TrayIcon.Icons>
+    <TrayIcons>
+      <TrayIcon Icon="/Assets/app.ico" ToolTipText="MiPlay Desktop" Clicked="ShowWindow">
+        <TrayIcon.Menu>
+          <NativeMenu>
+            <NativeMenuItem Header="打开 MiPlay" Click="ShowWindow" />
+            <NativeMenuItem Header="停止投放" Click="StopCasting" />
+            <NativeMenuItemSeparator />
+            <NativeMenuItem Header="退出" Click="Quit" />
+          </NativeMenu>
+        </TrayIcon.Menu>
+      </TrayIcon>
+    </TrayIcons>
+  </TrayIcon.Icons>
+</Application>

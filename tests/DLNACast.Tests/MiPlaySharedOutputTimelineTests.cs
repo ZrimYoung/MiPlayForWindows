@@ -181,4 +181,17 @@ public sealed class MiPlaySharedOutputTimelineTests
             136_319UL,
             timeline.GetTimestamp(71, 5_514_666).PresentationTimestamp90Khz);
     }
+
+    [Fact]
+    public void DepartedSendersUnownedFrameCanBeSkippedAtAnApprovedLiveJoinBoundary()
+    {
+        var timeline = new MiPlaySharedOutputTimeline();
+        var first = timeline.GetTimestamp(0, 1_000_000);
+        Assert.Throws<InvalidOperationException>(() => timeline.GetTimestamp(2, 1_042_666));
+        var joined = timeline.GetTimestamp(2, 1_042_666, allowForwardGap: true);
+        Assert.Equal(3_839UL, joined.PresentationTimestamp90Khz);
+        Assert.Equal(first, timeline.GetTimestamp(0, 2_000_000));
+        Assert.Throws<InvalidOperationException>(() => timeline.GetTimestamp(1, 2_000_000, allowForwardGap: true));
+        Assert.True(timeline.GetTimestamp(3, 1_064_000).PresentationTimestamp90Khz > joined.PresentationTimestamp90Khz);
+    }
 }

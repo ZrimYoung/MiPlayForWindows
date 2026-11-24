@@ -175,6 +175,59 @@ public sealed class MiPlaySharedSendCompletionCoordinatorTests
         Assert.True(secondReplacement.ParticipantId > firstReplacement.ParticipantId);
     }
 
+    [Fact]
+    public async Task LateJoinWaitsBeforeWriteAndInheritsExistingPacingOrigin()
+    {
+        var coordinator = new MiPlaySharedSendCompletionCoordinator(3);
+        var founder = coordinator.Register();
+        var late = coordinator.Register(1);
+        var waiting = coordinator.WaitForTurnAsync(late, 1, CancellationToken.None);
+        Assert.False(waiting.IsCompleted);
+        await Synchronize(coordinator, founder, 1_000_000);
+        Assert.Equal(100_000, await waiting);
+        var first = coordinator.SynchronizeAsync(founder, 1, 1_020_000, 20,
+            100_000, 1_000_000, false, CancellationToken.None);
+        Assert.False(first.IsCompleted);
+        var second = coordinator.SynchronizeAsync(late, 1, 1_023_000, 0,
+            (await waiting)!.Value, 1_000_000, false, CancellationToken.None);
+        Assert.All(await Task.WhenAll(first, second), result => Assert.Equal(3, result.SendCompletionSkewMilliseconds));
+    }
+
+    [Fact]
+    public async Task FounderDepartureSkipsOnlyUnownedFramesAndKeepsNewMembersOrdered()
+    {
+        var coordinator = new MiPlaySharedSendCompletionCoordinator(3);
+        var founder = coordinator.Register();
+        await Synchronize(coordinator, founder, 1_000_000);
+        var next = coordinator.Register(3);
+        var later = coordinator.Register(4);
+        var nextTurn = coordinator.WaitForTurnAsync(next, 3, CancellationToken.None);
+        var laterTurn = coordinator.WaitForTurnAsync(later, 4, CancellationToken.None);
+        Assert.False(nextTurn.IsCompleted);
+        coordinator.Unregister(founder);
+        Assert.Equal(100_000, await nextTurn.WaitAsync(TimeSpan.FromSeconds(2)));
+        Assert.False(laterTurn.IsCompleted);
+        await coordinator.SynchronizeAsync(next, 3, 1_065_000, 0, 100_000, 1_000_000, false, CancellationToken.None);
+        Assert.Equal(100_000, await laterTurn.WaitAsync(TimeSpan.FromSeconds(2)));
+    }
+
+    [Fact]
+    public async Task WaitingJoinCanCancelOrLeaveWithoutHoldingTheFounder()
+    {
+        var coordinator = new MiPlaySharedSendCompletionCoordinator(2);
+        var founder = coordinator.Register();
+        var late = coordinator.Register(3);
+        using var cancellation = new CancellationTokenSource();
+        var waiting = coordinator.WaitForTurnAsync(late, 3, cancellation.Token);
+        cancellation.Cancel();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => waiting);
+        var removed = coordinator.WaitForTurnAsync(late, 3, CancellationToken.None);
+        coordinator.Unregister(late);
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => removed.WaitAsync(TimeSpan.FromSeconds(2)));
+        await Synchronize(coordinator, founder, 1_000_000);
+        await Assert.ThrowsAsync<InvalidOperationException>(() => coordinator.WaitForTurnAsync(founder, 3, CancellationToken.None));
+    }
+
     private static Task<MiPlaySharedSendCompletion> Synchronize(
         MiPlaySharedSendCompletionCoordinator coordinator,
         MiPlaySharedSendParticipant participant,

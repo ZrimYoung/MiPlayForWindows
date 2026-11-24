@@ -46,9 +46,10 @@ public sealed class MiPlayWfdTimerResponderTests
     [InlineData(true)]
     public async Task WrongSourceAddressNeverGetsAResponse(bool tabletBehavior)
     {
-        await using var harness = new Harness(tabletBehavior);
-        using var foreign = new UdpClient(new IPEndPoint(IPAddress.Parse("127.0.0.2"), 0));
-        await harness.CheckValidExchange(1);
+        // macOS does not automatically bind every 127/8 address. Configure the
+        // expected peer as .2 and send from .1, without modifying host interfaces.
+        await using var harness = new Harness(tabletBehavior, IPAddress.Parse("127.0.0.2"));
+        using var foreign = new UdpClient(new IPEndPoint(IPAddress.Loopback, 0));
         await foreign.SendAsync(new byte[40], harness.Endpoint, harness.Token);
         using var noReply = CancellationTokenSource.CreateLinkedTokenSource(harness.Token);
         noReply.CancelAfter(TimeSpan.FromMilliseconds(100));
@@ -56,7 +57,6 @@ public sealed class MiPlayWfdTimerResponderTests
 
         if (tabletBehavior)
         {
-            await harness.CheckValidExchange(2);
             Assert.False(harness.Responder.IsCompleted);
         }
         else
@@ -166,13 +166,15 @@ public sealed class MiPlayWfdTimerResponderTests
         public IPEndPoint Endpoint { get; }
         public Task Responder { get; }
 
-        public Harness(bool tabletBehavior)
+        public Harness(bool tabletBehavior, IPAddress? expectedPeer = null)
         {
             this.tabletBehavior = tabletBehavior;
+            Receiver.Client.SendBufferSize = 128 * 1024;
+            Source.Client.ReceiveBufferSize = 128 * 1024;
             Endpoint = (IPEndPoint)Source.Client.LocalEndPoint!;
             var run = typeof(MiPlayLegacySystemAudioSessionRunner).GetMethod(
                 "RunTimerResponderAsync", BindingFlags.Static | BindingFlags.NonPublic)!;
-            Responder = (Task)run.Invoke(null, [Source, IPAddress.Loopback, Token, tabletBehavior])!;
+            Responder = (Task)run.Invoke(null, [Source, expectedPeer ?? IPAddress.Loopback, Token, tabletBehavior])!;
         }
 
         public async Task CheckValidExchange(uint sequence, UdpClient? changedPort = null)
