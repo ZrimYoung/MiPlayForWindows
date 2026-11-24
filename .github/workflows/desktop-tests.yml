@@ -41,9 +41,14 @@ jobs:
         run: dotnet test tests/DLNACast.Tests/DLNACast.Tests.csproj -c Release -p:Platform=x64 --filter "FullyQualifiedName!~WindowsAudioPolicyTests" --logger "trx;LogFileName=legacy-windows.trx"
       - name: Desktop UI bindings
         run: dotnet test tests/MiPlay.Desktop.Tests/MiPlay.Desktop.Tests.csproj -c Release --logger "trx;LogFileName=desktop-ui.trx"
-      - name: Native resampler tests
+      - name: Native raw capture, wakeup and PCM adapter tests
         if: runner.os == 'macOS'
         run: bash native/macos/build.sh artifacts/native --test
+      - name: Mac raw capture lifecycle and native adapter bridge
+        if: runner.os == 'macOS'
+        env:
+          MIPLAY_TEST_NATIVE_AUDIO: ${{ github.workspace }}/artifacts/native/libMiPlayAudio.dylib
+        run: dotnet test tests/MiPlay.Mac.Tests/MiPlay.Mac.Tests.csproj -c Release --logger "trx;LogFileName=mac-raw.trx"
       - name: Native media metadata and artwork tests
         if: runner.os == 'macOS'
         run: bash tests/test-mac-media.sh
@@ -51,7 +56,7 @@ jobs:
         run: python scripts/package-desktop.py ${{ matrix.platform }}
       - name: Native Mac service lifecycle without audio capture
         if: runner.os == 'macOS'
-        run: python tests/smoke-desktop-engine.py "artifacts/desktop/0.5.11/osx-arm64/MiPlay Desktop.app/Contents/MacOS/MiPlay.Engine"
+        run: python tests/smoke-desktop-engine.py "artifacts/desktop/0.6.4/osx-arm64/MiPlay Desktop.app/Contents/MacOS/MiPlay.Engine"
       - uses: actions/upload-artifact@v4
         if: always()
         with:

@@ -115,7 +115,8 @@ public sealed class MiPlaySharedAudioSession : IAsyncDisposable
         IAacEncoderFactory? encoderFactory = null,
         bool drainBeforeMediaReady = false,
         bool disposeWhenEmpty = true,
-        int audioBitRate = MiPlayProtocolConstants.AacBitRate)
+        int audioBitRate = MiPlayProtocolConstants.AacBitRate,
+        int? startupParticipantCount = null)
     {
         MiPlayAudioQuality.Validate(audioBitRate);
         ArgumentNullException.ThrowIfNull(audioSources);
@@ -131,6 +132,7 @@ public sealed class MiPlaySharedAudioSession : IAsyncDisposable
             throw new ArgumentOutOfRangeException(nameof(participantRoutes));
         }
 
+        if (startupParticipantCount is < 1 or > 63) throw new ArgumentOutOfRangeException(nameof(startupParticipantCount));
         var sourceBuffer = new PcmFrameBuffer(
             AudioChannelRoute.Stereo,
             PcmFrameFormat.MiPlayAac);
@@ -156,7 +158,7 @@ public sealed class MiPlaySharedAudioSession : IAsyncDisposable
             }
             cancellationToken.ThrowIfCancellationRequested();
             return new MiPlaySharedAudioSession(
-                participantRoutes.Count,
+                startupParticipantCount ?? participantRoutes.Count,
                 routeEncoders,
                 sourceBuffer,
                 capture, groupLifetime, drainBeforeMediaReady, disposeWhenEmpty);
@@ -787,6 +789,8 @@ public sealed class MiPlaySharedAudioSession : IAsyncDisposable
                 : 0;
         internal bool IsLateJoin => state.IsLateJoin;
         internal long CaptureDiscontinuityCount => owner.captureRecovery.DiscontinuityCount;
+        internal long SourcePcmOverruns => owner.SourceBuffer.Overruns;
+        internal long SourcePcmUnderruns => owner.SourceBuffer.Underruns;
         internal long RecoverySilenceFrameCount => owner.captureRecovery.ReplacedSilenceFrameCount;
         internal int EncoderPendingInputFrames => owner.routeEncoders[state.Route].PendingInputFrames;
         internal int EncoderBufferedAccessUnits => owner.routeEncoders[state.Route].BufferedAccessUnits;

@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Text;
+using System.Text.Json;
 using DLNACast.Core.Abstractions;
 using DLNACast.Core.Audio;
 using DLNACast.Core.Models;
@@ -13,8 +14,21 @@ internal static class NativeAudio
     private const string Library = "MiPlayAudio";
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)] internal delegate void SleepCallback();
     [DllImport(Library, CallingConvention = CallingConvention.Cdecl)] internal static extern int mp_default_output(StringBuilder uid, int capacity);
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl)] internal static extern int mp_outputs_json(StringBuilder json, int capacity);
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl)] internal static extern int mp_processes_json(StringBuilder json, int capacity);
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl)] internal static extern int mp_start_process(
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string uid, int pid, int includeChildren, int mute, out IntPtr handle);
     [DllImport(Library, CallingConvention = CallingConvention.Cdecl)] internal static extern int mp_start([MarshalAs(UnmanagedType.LPUTF8Str)] string uid, int mute, out IntPtr handle);
     [DllImport(Library, CallingConvention = CallingConvention.Cdecl)] internal static extern int mp_read(IntPtr handle, [Out] byte[] pcm, int capacity, out ulong endTimeNs);
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl)] internal static extern int mp_raw_format_json(IntPtr handle, StringBuilder json, int capacity);
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl)] internal static extern int mp_read_raw(IntPtr handle, [Out] byte[] pcm, int capacity, out ulong endTimeNs, out int discontinuity);
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl)] internal static extern int mp_wait_capture(IntPtr handle, int timeoutMilliseconds);
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl)] internal static extern int mp_pcm_converter_create([MarshalAs(UnmanagedType.LPUTF8Str)] string formatJson, out IntPtr converter);
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl)] internal static extern unsafe int mp_pcm_convert(IntPtr converter, byte* source, int byteCount, byte* output, int capacity);
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl)] internal static extern int mp_pcm_converter_info_json(IntPtr converter, StringBuilder json, int capacity);
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl)] internal static extern int mp_pcm_converter_reset(IntPtr converter);
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl)] internal static extern void mp_pcm_converter_destroy(IntPtr converter);
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl)] internal static extern int mp_capture_info_json(IntPtr handle, StringBuilder json, int capacity);
     [DllImport(Library, CallingConvention = CallingConvention.Cdecl)] internal static extern void mp_stop(IntPtr handle);
     [DllImport(Library, CallingConvention = CallingConvention.Cdecl)] internal static extern void mp_wait_nanos(ulong nanos);
     [DllImport(Library, CallingConvention = CallingConvention.Cdecl)] internal static extern ulong mp_time_nanos();
@@ -22,7 +36,7 @@ internal static class NativeAudio
     [DllImport(Library, CallingConvention = CallingConvention.Cdecl)] internal static extern void mp_unwatch_sleep(IntPtr observer);
 }
 
-public sealed class MacAudioPlatform : IDesktopAudioPlatform
+public sealed class MacAudioPlatform : IDesktopAudioPlatform, IRawAudioSourceCatalog
 {
     private readonly NativeAudio.SleepCallback sleepCallback;
     private IntPtr sleepObserver;
@@ -41,10 +55,22 @@ public sealed class MacAudioPlatform : IDesktopAudioPlatform
         if (status != 0) throw new AudioCaptureException($"无法读取系统默认音频输出（{status}）。");
         return new(uid.ToString(), "系统默认输出");
     }
-    public IReadOnlyList<AudioSourceItem> GetOutputDevices() => [GetDefaultOutputDevice()];
-    public IReadOnlyList<AudioSourceItem> GetCandidateProcesses() => [];
-    public IAudioCaptureSource CreateCapture(CaptureSelection selection) => selection is CaptureSelection.SystemMix system
-        ? new MacCaptureSource(system) : throw new NotSupportedException("首版支持系统声音投放。");
+    public IReadOnlyList<AudioSourceItem> GetOutputDevices() => ReadSources(NativeAudio.mp_outputs_json);
+    public IReadOnlyList<AudioSourceItem> GetCandidateProcesses() => ReadSources(NativeAudio.mp_processes_json);
+    private static IReadOnlyList<AudioSourceItem> ReadSources(Func<StringBuilder, int, int> read)
+    {
+        var buffer = new StringBuilder(128 * 1024);
+        var status = read(buffer, buffer.Capacity);
+        if (status < 0) throw new AudioCaptureException($"无法枚举音频来源（{status}）。");
+        using var document = JsonDocument.Parse(buffer.ToString());
+        return document.RootElement.EnumerateArray().Select(value => new AudioSourceItem(
+            value.GetProperty("id").GetString()!, value.GetProperty("name").GetString()!,
+            value.TryGetProperty("processId", out var pid) ? pid.GetInt32() : null)).ToArray();
+    }
+    public IAudioCaptureSource CreateCapture(CaptureSelection selection) => selection is CaptureSelection.SystemMix or CaptureSelection.Process
+        ? new MacCaptureSource(selection) : throw new NotSupportedException("不支持此音频来源。");
+    public IRawAudioCaptureSource CreateRawCapture(CaptureSelection selection) => selection is CaptureSelection.SystemMix or CaptureSelection.Process
+        ? new MacCaptureSource(selection) : throw new NotSupportedException("不支持此音频来源。");
     public IMediaPacingClock CreateMediaClock() => new MacMediaClock();
     public void Dispose()
     {
@@ -56,96 +82,8 @@ public sealed class MacAudioPlatform : IDesktopAudioPlatform
 
 internal sealed class MacMediaClock : IMediaPacingClock
 {
-    public ValueTask WaitUntilAsync(long targetTimestamp, CancellationToken token)
-    {
-        while (true)
-        {
-            token.ThrowIfCancellationRequested();
-            var remaining = targetTimestamp - Stopwatch.GetTimestamp();
-            if (remaining <= 0) return ValueTask.CompletedTask;
-            var nanos = (ulong)Math.Min(20_000_000, remaining * 1_000_000_000d / Stopwatch.Frequency);
-            if (nanos > 0) NativeAudio.mp_wait_nanos(nanos);
-        }
-    }
-    public void Dispose() { }
-}
-
-internal sealed class MacCaptureSource(CaptureSelection.SystemMix selection) : IAudioCaptureSource
-{
-    private readonly SemaphoreSlim gate = new(1, 1);
-    private readonly CaptureHealthTracker health = new();
-    private IntPtr handle;
-    private CancellationTokenSource? lifetime;
-    private Task? worker;
-    public CaptureSelection Selection => selection;
-    public bool IsRunning => worker is { IsCompleted: false };
-    public CaptureHealth Health => health.Snapshot();
-    public event EventHandler<Exception>? CaptureFailed;
-
-    public async Task StartAsync(PcmFrameBuffer destination, CancellationToken token)
-    {
-        await gate.WaitAsync(token).ConfigureAwait(false);
-        try
-        {
-            if (handle != IntPtr.Zero) throw new InvalidOperationException("音频采集已经启动。");
-            token.ThrowIfCancellationRequested();
-            var status = NativeAudio.mp_start(selection.EndpointId, selection.MuteLocalOutput ? 1 : 0, out handle);
-            if (status != 0)
-            {
-                if (status == 0x7065726d) throw new UnauthorizedAccessException("系统未允许音频录制。");
-                throw new AudioCaptureException($"无法开始系统音频采集（{status}），请检查系统音频录制权限和输出设备。");
-            }
-            lifetime = CancellationTokenSource.CreateLinkedTokenSource(token);
-            health.Reset();
-            var offset = checked((long)PcmPresentationTimestamp.GetElapsedRealtimeNanoseconds() - (long)NativeAudio.mp_time_nanos());
-            var captureHandle = handle;
-            var workerToken = lifetime.Token;
-            worker = Task.Run(async () =>
-            {
-                var buffer = new byte[65536];
-                var assembler = new PcmFrameAssembler(destination);
-                try
-                {
-                    while (!workerToken.IsCancellationRequested)
-                    {
-                        var count = NativeAudio.mp_read(captureHandle, buffer, buffer.Length, out var timestamp);
-                        if (count < 0) throw new AudioCaptureException($"系统音频转换失败（{count}）。");
-                        if (count > 0)
-                        {
-                            health.Record(buffer.AsSpan(0, count));
-                            assembler.Push(buffer.AsSpan(0, count), checked((ulong)((long)timestamp + offset)));
-                        }
-                        else await Task.Delay(3, workerToken).ConfigureAwait(false);
-                    }
-                }
-                catch (OperationCanceledException) when (workerToken.IsCancellationRequested) { }
-                catch (Exception exception) { CaptureFailed?.Invoke(this, exception); }
-            }, CancellationToken.None);
-        }
-        catch
-        {
-            if (handle != IntPtr.Zero) NativeAudio.mp_stop(handle);
-            handle = IntPtr.Zero;
-            throw;
-        }
-        finally { gate.Release(); }
-    }
-
-    public async Task StopAsync()
-    {
-        await gate.WaitAsync().ConfigureAwait(false);
-        try
-        {
-            lifetime?.Cancel();
-            if (worker is not null) await worker.ConfigureAwait(false);
-            // Stop the HAL callback before destroying its native queue and converter.
-            if (handle != IntPtr.Zero) NativeAudio.mp_stop(handle);
-            handle = IntPtr.Zero;
-            worker = null;
-            lifetime?.Dispose();
-            lifetime = null;
-        }
-        finally { gate.Release(); }
-    }
-    public async ValueTask DisposeAsync() => await StopAsync().ConfigureAwait(false);
+    private readonly DedicatedMediaPacingClock clock = new(NativeAudio.mp_wait_nanos);
+    public ValueTask WaitUntilAsync(long targetTimestamp, CancellationToken token) =>
+        clock.WaitUntilAsync(targetTimestamp, token);
+    public void Dispose() => clock.Dispose();
 }

@@ -16,6 +16,36 @@ struct SpeakerCard: Codable, Identifiable {
     var groupName: String? = nil
     var channel: String? = nil
     var failure: String? = nil
+    var transport: String? = nil
+    var channelRoute: String? = nil
+    var diagnostics: DesktopDiagnostic? = nil
+    var isDlna: Bool { transport == "DLNA" }
+}
+struct DesktopAudioSource: Codable, Equatable {
+    var mode = "system"
+    var outputDeviceId = ""
+    var processId: Int? = nil
+    var includeChildren = true
+    var dictionary: [String: Any] {
+        ["mode": mode, "outputDeviceId": outputDeviceId, "processId": processId.map { $0 as Any } ?? NSNull(), "includeChildren": includeChildren]
+    }
+}
+struct DesktopAudioSourceItem: Codable, Identifiable, Equatable {
+    let id: String
+    let displayName: String
+    var processId: Int? = nil
+}
+struct DesktopDiagnostic: Codable {
+    var bufferedMilliseconds: Int
+    var overruns: Int64
+    var underruns: Int64
+    var accessUnits: Int64
+    var rtpFrames: Int64
+    var wireBytes: Int64
+    var maximumMediaSendGapMilliseconds: Double
+    var maximumInterReceiverSendSkewMilliseconds: Double
+    var encoderPendingInputFrames: Int
+    var encoderBufferedAccessUnits: Int
 }
 struct DesktopSnapshot: Codable {
     var revision: Int64 = 0
@@ -26,6 +56,22 @@ struct DesktopSnapshot: Codable {
     var supportsLocalMute = true
     var synchronizedPlayback = true
     var audioBitRate = 256000
+    var audioSource: DesktopAudioSource? = nil
+    var outputDevices: [DesktopAudioSourceItem]? = nil
+    var candidateProcesses: [DesktopAudioSourceItem]? = nil
+    var dlnaEnabled: Bool? = nil
+    var captureDescription: String {
+        guard let source = audioSource else { return "此 Mac 正在播放的所有声音" }
+        if source.mode == "process" {
+            let name = candidateProcesses?.first(where: { $0.processId == source.processId })?.displayName ?? "所选应用"
+            return "仅捕获 \(name) 的声音"
+        }
+        if !source.outputDeviceId.isEmpty {
+            let name = outputDevices?.first(where: { $0.id == source.outputDeviceId })?.displayName ?? "所选输出设备"
+            return "捕获 \(name) 的声音"
+        }
+        return "此 Mac 正在播放的所有声音"
+    }
 }
 private struct EngineEvent: Decodable {
     let event: String
@@ -92,6 +138,17 @@ final class EngineClient: ObservableObject {
                     snapshot.speakers[1].online = !CommandLine.arguments.contains("--group-offline-fixture")
                 }
             }
+            if CommandLine.arguments.contains("--sources-fixture") {
+                snapshot.audioSource = DesktopAudioSource()
+                snapshot.outputDevices = [DesktopAudioSourceItem(id: "builtin", displayName: "Mac 扬声器"), DesktopAudioSourceItem(id: "display", displayName: "外接显示器")]
+                snapshot.candidateProcesses = [DesktopAudioSourceItem(id: "process:100", displayName: "音乐", processId: 100), DesktopAudioSourceItem(id: "process:200", displayName: "QQ 音乐", processId: 200)]
+                snapshot.dlnaEnabled = true
+                snapshot.speakers[0].channelRoute = "LeftAsMono"
+                snapshot.speakers[0].diagnostics = DesktopDiagnostic(bufferedMilliseconds: 34, overruns: 0, underruns: 2,
+                    accessUnits: 5800, rtpFrames: 12000, wireBytes: 1500000, maximumMediaSendGapMilliseconds: 24,
+                    maximumInterReceiverSendSkewMilliseconds: 0.7, encoderPendingInputFrames: 1, encoderBufferedAccessUnits: 2)
+                snapshot.speakers[2].transport = "DLNA"
+            }
         }
     }
     func start() {
@@ -157,7 +214,14 @@ final class EngineClient: ObservableObject {
             guard let event = try? JSONDecoder().decode(EngineEvent.self, from: line) else { continue }
             DispatchQueue.main.async { [weak self] in
                 guard let self else { return }
-                if let snapshot = event.snapshot, snapshot.revision >= self.snapshot.revision { self.snapshot = snapshot }
+                if let snapshot = event.snapshot, snapshot.revision >= self.snapshot.revision {
+                    let sourceChanged = snapshot.audioSource != self.snapshot.audioSource
+                    self.snapshot = snapshot
+                    if sourceChanged {
+                        self.send("media", value: NSNull())
+                        self.media.setCaptureBundle(self.selectedCaptureBundle)
+                    }
+                }
                 if let message = event.message { self.error = message }
                 if let path = event.path { NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: path)]) }
             }
@@ -191,9 +255,19 @@ final class EngineClient: ObservableObject {
         }
         RunLoop.main.add(timer, forMode: .common); delayTimer = timer
     }
+    private var selectedCaptureBundle: String? {
+        guard snapshot.audioSource?.mode == "process" else { return nil }
+        guard let pid = snapshot.audioSource?.processId,
+              let app = NSRunningApplication(processIdentifier: pid_t(pid)), !app.isTerminated,
+              let bundle = app.bundleIdentifier, !bundle.isEmpty else { return "" }
+        return bundle
+    }
     private func forwardMedia(_ item: NowPlayingItem?) {
         guard connected, !preview, !quitting else { return }
         guard let item, media.enabled else {
+            send("media", value: NSNull()); return
+        }
+        if let captureBundle = selectedCaptureBundle, item.bundleIdentifier != captureBundle {
             send("media", value: NSNull()); return
         }
         func milliseconds(_ value: Double?) -> Int64 {

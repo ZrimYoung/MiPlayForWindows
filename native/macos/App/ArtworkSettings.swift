@@ -2,6 +2,21 @@ import AppKit
 import Combine
 import Darwin
 
+/// Interactive previews keep settings in memory, including existing media switches.
+enum DesktopPreferences {
+    static var preview: Bool {
+        ["--preview", "--snapshot", "--popover-check", "--settings-menu-check", "--appearance-check", "--artwork-fixture", "--media-check"]
+            .contains { CommandLine.arguments.contains($0) }
+    }
+    static func set(_ value: Any, forKey key: String) {
+        if preview {
+            var values = UserDefaults.standard.volatileDomain(forName: UserDefaults.argumentDomain)
+            values[key] = value
+            UserDefaults.standard.setVolatileDomain(values, forName: UserDefaults.argumentDomain)
+        } else { UserDefaults.standard.set(value, forKey: key) }
+    }
+}
+
 enum ArtworkFormat: String, CaseIterable {
     case jpeg, webp, png
     var label: String {
@@ -39,7 +54,7 @@ final class ArtworkPreferences: ObservableObject {
     @Published var options = ArtworkOptions.load() {
         didSet {
             guard oldValue != options else { return }
-            UserDefaults.standard.set(options.dictionary, forKey: ArtworkOptions.preferenceKey)
+            DesktopPreferences.set(options.dictionary, forKey: ArtworkOptions.preferenceKey)
             NotificationCenter.default.post(name: Self.changed, object: nil)
         }
     }

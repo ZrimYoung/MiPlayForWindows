@@ -153,6 +153,7 @@ public sealed class PcmFrameBuffer : IAsyncDisposable
                 Interlocked.Increment(ref _overruns);
             }
             _queue.Enqueue(frame);
+            _frameAvailable.TrySetResult();
         }
     }
 
@@ -302,6 +303,15 @@ public sealed class PcmFrameBuffer : IAsyncDisposable
         {
             throw new InvalidOperationException("An unpaced read requires a sequence-preserving PCM buffer.");
         }
+        return await ReadCapturedFrameAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Transfers captured frames as they arrive, without a second pacing clock
+    /// or synthetic silence. Bounded live queues keep their existing drop-oldest policy.
+    /// </summary>
+    internal async ValueTask<PcmFrameRead> ReadCapturedFrameAsync(CancellationToken cancellationToken)
+    {
         await _readClockGate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
@@ -313,7 +323,7 @@ public sealed class PcmFrameBuffer : IAsyncDisposable
                     if (_queue.Count > 0)
                     {
                         var frame = _queue.Dequeue();
-                        _writableSlots!.Release();
+                        _writableSlots?.Release();
                         return frame;
                     }
                     if (_completed)

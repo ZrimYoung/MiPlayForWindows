@@ -1,6 +1,15 @@
 # MiPlay Desktop 开发与测试
 
-## 0.5 交互与架构
+## 0.6.2 音频调度与连接诊断（2026-11-24）
+
+- Mac 的 `mach_wait_until` 由会话自有的后台定时线程执行，调用方异步等待，不再占用采集、编码、回连及其他音箱使用的线程池工作线程。取消最多等待一个 20 ms 原生睡眠片段，停止后回收线程。
+- 共享采集层按实际帧到达搬运，不再引入第二套定时器或提前填静音；有界队列可保留约 128 ms 的短暂积压并立即排出，不固定增加播放延迟。编码层继续统一供给节拍及恢复静音。
+- 原生采集期间登记延迟敏感的系统活动，停止/失败后释放；允许系统空闲睡眠，不修改电源设置。
+- 保留已验证的共同 AAC/PTS 和逐帧同步协议。单台音频 TCP 写入阻塞限时由 3 s 改为 500 ms，失败先移除该成员的广播/发送等待，再进行传输清理；现有三次重连及用户停止取消规则继续生效。
+- 连接诊断包含版本握手、反向 RTSP/辅助/音频连接及播放准备阶段和累计耗时；播放诊断分别记录等 AAC、写 socket、同步等待的区间最大值，以及共享源 PCM 溢出/欠载。原有每音箱 PCM 队列仅用于信号诊断，其溢出不能直接解释为编码音频丢帧。
+- 本轮不改变音质、音量、立体声组合或已保存延迟。不将发送间隔、内部缓冲量或模拟测试当作实测声音延迟；连接提速和实际断续改善仍需真机复核。
+
+## 0.6 交互与架构
 
 - Mac 窗口使用 SwiftUI，窗口生命周期、菜单栏和睡眠通知使用 AppKit。代码位于 `native/macos/App`，由系统 Swift 编译器构建；不使用 Avalonia 渲染 Mac 交付界面。
 - `MiPlay.Engine` 是随应用打包的本地 .NET 协议进程，继续复用经过回归验证的 MiPlay 发送实现。Swift 通过匿名管道收发 JSON 行，没有本地 HTTP 服务、开放监听端口或云端调用。主窗口退出或崩溃导致输入管道关闭时，服务停止全部投放并释放采集。
@@ -42,7 +51,7 @@ dotnet test tests/MiPlay.Desktop.Tests/MiPlay.Desktop.Tests.csproj -c Release
 bash native/macos/build.sh artifacts/native --test
 python3 scripts/package-desktop.py macos
 # 原生 Mac 应用
-open 'artifacts/desktop/0.5.11/osx-arm64/MiPlay Desktop.app'
+open 'artifacts/desktop/0.6.2/osx-arm64/MiPlay Desktop.app'
 # Windows 构建（Mac 上只能交叉编译，运行测试需要 Windows）
 python3 scripts/package-desktop.py windows
 ```
@@ -114,3 +123,94 @@ Mac 更多设置可开启「读取 Apple Music 歌词（实验）」，需要用
 设置 → 封面 → 主动获取 Apple Music 高清封面，默认关闭，与歌词功能独立。开启后可能需要自动化权限。仅凭当前 Music 曲目的精确 ID 获取其官方高清图，不按歌名搜索。先使用系统封面，成功后自动替换，无需重连；关闭恢复系统封面。图片格式、尺寸、大小上限仍按现有设置处理，界面显示实际输出。QQ 高清来源尚未接入。
 
 0.5.11 另增加 512 KB / 1 MB 图片大小上限（实验），保留 256 KB 默认值。大图按实际编码结果发送；如接收端不显示或更新慢，可随时调回 256 KB。
+
+
+## 0.6.0 从 Windows 主分支移植的桌面能力（2026-11-18）
+
+- 音源：设置中选择系统输出或单应用，刷新列表后应用。系统模式支持跟随默认或固定输出设备；单应用模式选当前音频进程及可选辅助进程，不支持把任意 PID 当作持久身份。应用音源不跨应用重启恢复，设备固定 UID 可保存；切换音源停止全部会话，用户重新选择接收端。找不到所选设备/应用时报错，不回退捕获全部系统声音。
+- Mac 使用 inclusive Core Audio Process Tap，只包含选定应用及辅助进程，动态更新辅助进程集合；暂停和短暂无声不等于应用退出。Windows 复用 main 的进程 loopback 和输出设备枚举。两端通过同一采集订阅转发音频；Mac 源静音适用于系统和单应用，Windows 仍禁用静音选项。
+- 进程音源的媒体信息只允许来自对应 bundle 的系统媒体数据；捕获 QQ 时不会附上 Apple Music 歌词/封面。系统仅能提供另一播放器的媒体信息时，显示源范围并发送空媒体，不按名称猜测。
+- 独立接收设备可选 Stereo / LeftAsMono / RightAsMono。配置改变停止全部，重新准备共享路由编码器后由用户重新选择。默认 Stereo 仍共用一个编码器；仅存在手动路由配置时准备三种路由。预备路由数与首次就绪设备数分开，不等待三个接收端才播放。官方立体声组合继续合并控制，不允许覆盖声道。
+- DLNA 发现默认关闭，在设置开启后使用 SSDP / UPnP。设备 ID 使用 dlna: 前缀，与 MiPlay 独立保存。音频优先 PCM/WAV，格式不被接受或拉流失败时尝试 MP3 320 kbps；新增固定版本 LAME 静态编码器随包提供。关闭 DLNA 停止其会话，不停止 MiPlay。DLNA 不使用 MiPlay 同步或实时延迟，不自动混同两种协议下的同一设备。DLNA 本轮不接入 MiPlay 媒体歌词封面转发。
+- Mac 主窗口与 Windows 设备卡增加折叠实时诊断，展示缓冲、发送、编码积压和队列异常。数值不代表声学端到端延迟。原诊断导出保留。
+- 声学延迟测试按用户要求暂缓，本版本不申请麦克风权限或发送测试音。只有用户选择音箱后才开始采集/投放。
+
+主窗口更多菜单仅保留投放设置入口、重新扫描、停止全部、权限入口和导出诊断。音质、同步模式、媒体信息和歌词开关统一在设置窗口，避免重复入口。
+
+
+## 0.6.1 Mac 外观与设置侧栏（2026-11-18）
+
+- 设置分为外观、音源、音频与连接、声道分配、封面、媒体与歌词、诊断；打开默认外观页。音源保留草稿和应用动作，切换分类不会发出投放命令。
+- 外观可跟随系统、日间或夜间，应用到主窗口、菜单栏浮窗、设置及菜单，独立保存于本应用偏好。
+- 背景可选专辑氛围或原生毛玻璃。专辑氛围在后台生成小尺寸模糊图，只在图片变化时更新，无图日间纯白/夜间深色；原生毛玻璃使用 NSVisualEffectView。减少透明度时使用纯色，减少动态效果时禁用过渡。
+- 外观与封面连续性改动针对Mac；Windows继续交付同版本的音源/路由/DLNA测试包，未新增外观设置。
+
+封面与元数据在同一录音的短空窗中保留已验证字段，明确清空和退出立即清除；新歌过渡只作用于显示，不把上一首封面发送给下一首。
+
+
+## 0.6.2 Mac 采集性能与多声道准备（2026-11-24）
+
+Mac 当前使用 Core Audio Process Tap，不创建视频录屏流；系统的“屏幕与系统音频录制”权限名称不代表应用在采集视频。采集性能、格式转换、编码、网络发送和界面负载需要分开观测，不能仅凭权限入口判断卡顿原因。
+
+本轮继续使用现有 Objective-C++／Swift 采集层，不整包替换为另一个 Tap 包装库。四个已核对的项目提供不同层次的参考，以下判断来自其公开文档和源码，不是本机 CPU、听感或掉音率排名：
+
+| 项目与定位 | 借鉴内容 | 采用边界 |
+| --- | --- | --- |
+| [CPAL](https://github.com/RustAudio/cpal)：跨平台音频输入输出库 | 设备与格式枚举、稳定身份、时间戳、缓冲溢出／不足报告、设备变化与资源生命周期；[Mac 回环实现](https://github.com/RustAudio/cpal/blob/master/src/host/coreaudio/macos/loopback.rs)同样使用 Process Tap 和私有聚合设备，[修复记录](https://github.com/RustAudio/cpal/blob/master/CHANGELOG.md)可作回归场景清单 | 当前 Mac 回环要求 14.6+，按设备 stream 0 建立采集，真实声道布局仍需设备验证。只借鉴设计，不为现有原生层引入 Rust；不能把换库视为性能提升的证据 |
+| [AudioCap](https://github.com/insidegui/AudioCap)：单应用录音与 Tap API 示例 | PID 到音频进程的转换、读取 Tap 实际格式、创建与销毁顺序；适合作为最小采集对照。[实现](https://github.com/insidegui/AudioCap/blob/main/AudioCap/ProcessTap/ProcessTap.swift)较易核对 | 示例使用双声道混音，并在录音回调流程中包装缓冲、写文件，不能照搬为网络发送结构。权限检查含可关闭的私有 TCC API，本轮只参考公开采集逻辑 |
+| [SystemAudioTap](https://github.com/heykadirhan/SystemAudioTap)：采集、缓冲、处理后在本机回放的模块 | 实时回调避免分配、锁和日志；后台读取健康计数；处理采样率变化、队列耗尽和采集失效后释放静音 | 当前为 Float32 双声道，使用独立采集／回放时钟；其自适应队列、拼接和淡出针对本机回放，不直接移植为 MiPlay 多音箱同步算法。项目较小，参考设计仍需自行验证 |
+| [CoreAudioTapKit](https://github.com/CJStanfield/CoreAudioTapKit)：采集和本机输出共用一个 IOProc／主时钟的模块 | [预分配工作缓冲](https://github.com/CJStanfield/CoreAudioTapKit/blob/main/Sources/CoreAudioTapKit/SystemAudioTapEngine.swift)、[等待聚合设备就绪、定位 Tap 输入、关闭顺序](https://github.com/CJStanfield/CoreAudioTapKit/blob/main/Sources/CoreAudioTapKit/SystemTapCapture.swift)；可能阻塞的启动／停止放在后台 | 当前归一为双声道，并与本机回放耦合。输入定位需按我们的聚合设备拓扑判断；其单时钟设计不消除网络音箱的独立时钟，不能承诺提升远端同步精度 |
+
+本轮改动范围与后续边界：
+
+- 保留实时回调到有界队列的结构，优先复用格式转换缓冲；已经交错排列的输入按块复制，避免逐帧小块复制。格式变化或重新绑定设备后重建匹配格式的缓冲，避免跨格式复用。是否降低实际负载和掉音仍需测量。
+- 诊断区分 Tap 的原始输入格式和交付给现有编码器的格式，保留真实采样率、样本类型和声道数的可见性。不能用“交付为双声道”推断输入本身只有两个声道，也不能把源格式诊断视为多声道发送已经实现。
+- 当前 MiPlay 发送继续使用 48 kHz、S16、双声道 PCM 输入和既有 AAC-LC 路径；本轮不切换编码器或发送格式，不承诺多声道接收兼容，也不因减少复制而声称可听音质已提高。
+- 后续多声道以实际设备流和声道布局为依据，采集、转换与编码边界分离。可增加普通 Core Audio 输入设备入口，用 [BlackHole](https://github.com/ExistentialAudio/BlackHole) 验证真正的 5.1／7.1 PCM；播放器必须实际输出多声道，发送协议和接收端也需分别验证。BlackHole 安装、音频路由和 [libASPL](https://github.com/gavv/libASPL) 自研虚拟设备均不属于本轮改动。
+- Dolby／DTS 原始码流及 Atmos 对象元数据暂缓；系统解码后的多声道 PCM 不等同于保留原码。声学延迟测试继续暂缓，本轮不启动录制、控制播放器、连接手机或修改系统音频设置。
+
+本节记录研究依据和实施范围，不构成自动测试、实际性能或音箱听音验收记录；验证结果另按实际执行情况登记。
+
+## 0.6.3 原始 PCM 与发送适配分离（2026-11-24）
+
+采集格式不以接收端能力为前提。系统音源按 Tap 实际提供的采样率、精度和声道顺序进入有界队列，保留 S16／packed S24／S32／Float32、8–192 kHz、最多32声道。平面输入只重新交错，不先混成双声道。队列按实际格式在启动时分配，音频回调不创建缓冲、转换或发送网络数据。
+
+`IRawAudioSourceCatalog.CreateRawCapture` 和 `IRawAudioCaptureSource.StartRawAsync` 向同步 `IRawPcmSink` 提供 `RawPcmBlockView`：包含完整源 PCM、格式、声道标签、单调时钟结束时间及断点。视图借用生产者缓冲，只在 `Write` 调用内有效；异步消费者需自行持有拷贝。本版没有原始音频落盘或无限历史缓存。
+
+旧发送接口通过独立 `MacPcmSendAdapter` 转为48 kHz／S16／双声道，再进入原共享编码、同步及MiPlay网络链路；后续多声道消费者可以直接接原始入口，无需放宽旧发送接口的全局常量。源格式和交付格式分别记入诊断。
+
+转换策略明确记录在 `DownmixPolicy`：
+
+- `MonoDuplicate`：单声道复制至左右；`Stereo`：常规左右，48 kHz S16可逐字节旁路。
+- `SystemLayout`：按真实Core Audio声道标签转换；标准系统下混不包含独立LFE。设备布局只在完整匹配单一输出流时采用，不按6／8声道数猜测位置。
+- `DiscreteAverage`：布局未知时按奇偶声道索引分至左右、各侧取均值，确保每个声道有贡献并保留余量。这是兼容混音，不声称重建5.1／7.1空间位置或Dolby对象。
+
+采集专用线程等待原生事件，每次等待最多20 ms；停止先取消并等线程、转换器退出，再释放Tap和队列。格式变化通过Tap属性监听通知，检测后停止并提示重新开始；后台每秒检查作为补充，不宣称无缝热切换。断点会重置重采样历史并清理未完成的发送帧，避免跨断点拼接。事件握手使用顺序一致原子并清理旧信号，避免暂停后忙转。
+
+当前保留单应用模式原有的跨设备立体声混音行为；系统已经交付双声道时，原始入口也只有双声道。采集器不会恢复播放器或系统先前已经混掉的声道。普通输入设备／BlackHole入口、全链路原生多声道发送、原生AAC对照和Dolby／DTS原码仍为后续工作；不以这些未完成项阻止本版原始采集。
+
+离线验证入口：
+
+```sh
+bash native/macos/build.sh artifacts/native --test
+MIPLAY_TEST_NATIVE_AUDIO="$PWD/artifacts/native/libMiPlayAudio.dylib" dotnet test tests/MiPlay.Mac.Tests/MiPlay.Mac.Tests.csproj -c Release
+```
+
+这两项仅使用合成数据和fake采集后端，不开始系统声音采集；真实音箱听音、性能和长期稳定性需另验收。
+
+## 0.6.4 接收端音频控制端口（2026-11-24）
+
+发现、身份查询和实际连接使用同一个明确的 `RendererDevice.MiPlayControlPort`。只对已核实的app-5紧凑描述符（payload恰4字节、前缀`04 83`）解析末两字节的大端非零端口；其他布局继续使用已验证的8899回退。`_mi-connect`的DNS SRV端口属于发现服务，UPnP HTTP端口也不参与音频端口选择；旧`MiPlayLegacyAppData`前两个字节的解释不用于此决策。
+
+本机此次FusionPlay-Windows公告`appsData=gQAEBINJ0w==`，表示音频控制18899。只读TCP检查中，18899约4 ms建立连接，而8899超时，吻合此前`ControlConnect`五秒超时。身份缓存按IP和音频控制端口变化刷新。该修复解决已证实的端口选择错误，不等同于后续认证、音频回连或实际播放验收；小米电脑管家的SafetyAuth兼容性仍单独处理。
+
+## 本机安装与后续更新
+
+本机使用固定位置 `/Applications/MiPlay Desktop.app`。开发包构建后执行下列安装脚本，会验证签名、正常退出旧版并替换应用，再从“应用程序”启动；配置和权限数据目录继续沿用。安装失败时回滚已替换的旧应用。脚本默认读取打包脚本中的当前版本，也可通过 `--source` 指定 `.app`。
+
+```sh
+python3 scripts/package-desktop.py macos
+python3 scripts/install-macos-local.py
+```
+
+此入口用于本机开发测试更新，不是联网自动更新服务。安装和后续开发更新已由用户授权，固定安装位置保持一致。

@@ -13,7 +13,7 @@ import sys
 import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
-VERSION = "0.5.11"
+VERSION = "0.6.4"
 
 
 def run(*args):
@@ -82,10 +82,16 @@ def main():
         shutil.copy2(archive, notices / archive.name)
         shutil.copy2(ffmpeg.parent / "COPYING.LGPLv2.1", notices / "COPYING.LGPLv2.1")
         shutil.copy2(ROOT / "scripts/prepare-desktop-ffmpeg.py", notices / "build-recipe.py")
+        lame_notices = resources / "third-party/lame"
+        lame_notices.mkdir(parents=True)
+        lame_source = ROOT / "artifacts/dependencies/macos/lame-3.100"
+        for name in ("COPYING", "LICENSE", "README"):
+            shutil.copy2(lame_source / name, lame_notices / name)
+        shutil.copy2(lame_source.parent / "lame-3.100.tar.gz", lame_notices / "lame-3.100.tar.gz")
         with (app / "Contents/Info.plist").open("wb") as file:
             plistlib.dump({"CFBundleName": "MiPlay Desktop", "CFBundleDisplayName": "MiPlay Desktop",
                           "CFBundleIdentifier": "com.zrim.miplaydesktop", "CFBundleExecutable": "MiPlay.Desktop",
-                          "CFBundlePackageType": "APPL", "CFBundleShortVersionString": VERSION, "CFBundleVersion": "14",
+                          "CFBundlePackageType": "APPL", "CFBundleShortVersionString": VERSION, "CFBundleVersion": "19",
                           "LSMinimumSystemVersion": "14.2", "NSHighResolutionCapable": True, "LSMultipleInstancesProhibited": True,
                           "NSAudioCaptureUsageDescription": "捕获电脑正在播放的声音，并投放到你选择的小米妙播音箱。",
                           "NSLocalNetworkUsageDescription": "查找并连接同一局域网中的小米妙播音箱。",

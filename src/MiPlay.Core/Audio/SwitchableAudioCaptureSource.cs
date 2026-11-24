@@ -14,6 +14,7 @@ public sealed class SwitchableAudioCaptureSource(
     private readonly IAudioSourceCatalog _audioSources = audioSources ?? throw new ArgumentNullException(nameof(audioSources));
     private readonly SemaphoreSlim _gate = new(1, 1);
     private IAudioCaptureSource? _active;
+    private CaptureHealth? _lastHealth;
     private PcmFrameBuffer? _destination;
     private CaptureSelection _selection = selection ?? throw new ArgumentNullException(nameof(selection));
     private bool _paused;
@@ -22,7 +23,7 @@ public sealed class SwitchableAudioCaptureSource(
     public CaptureSelection Selection => _active?.Selection ?? _selection;
     public bool IsRunning => _active?.IsRunning == true;
     internal bool IsPaused => _paused;
-    public CaptureHealth Health => _active?.Health ?? new(DateTimeOffset.UtcNow, null, null, 0);
+    public CaptureHealth Health => _active?.Health ?? Volatile.Read(ref _lastHealth) ?? new(DateTimeOffset.UtcNow, null, null, 0);
     public event EventHandler<Exception>? CaptureFailed;
     public Exception? LastFailure { get; private set; }
 
@@ -53,6 +54,7 @@ public sealed class SwitchableAudioCaptureSource(
 
             _destination = destination;
             _active = capture;
+            Volatile.Write(ref _lastHealth, null);
             LastFailure = null;
             _paused = false;
         }
@@ -142,6 +144,7 @@ public sealed class SwitchableAudioCaptureSource(
             }
             finally
             {
+                Volatile.Write(ref _lastHealth, previous.Health);
                 await previous.DisposeAsync().ConfigureAwait(false);
             }
         }
@@ -208,6 +211,7 @@ public sealed class SwitchableAudioCaptureSource(
                 }
                 finally
                 {
+                    Volatile.Write(ref _lastHealth, previous.Health);
                     await previous.DisposeAsync().ConfigureAwait(false);
                 }
             }
@@ -241,6 +245,7 @@ public sealed class SwitchableAudioCaptureSource(
             {
                 _active.CaptureFailed -= OnCaptureFailed;
                 await _active.DisposeAsync().ConfigureAwait(false);
+                Volatile.Write(ref _lastHealth, _active.Health);
                 _active = null;
             }
             _destination = null;

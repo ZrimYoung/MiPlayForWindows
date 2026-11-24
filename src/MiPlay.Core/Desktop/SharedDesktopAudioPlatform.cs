@@ -11,6 +11,7 @@ public sealed class SharedDesktopAudioPlatform(IDesktopAudioPlatform inner) : ID
     private readonly object sync = new();
     private readonly Dictionary<Subscription, PcmFrameBuffer> subscribers = [];
     private SwitchableAudioCaptureSource? capture;
+    private CaptureHealth? lastCaptureHealth;
     private PcmFrameBuffer? buffer;
     private CancellationTokenSource? lifetime;
     private Task? pump;
@@ -32,6 +33,8 @@ public sealed class SharedDesktopAudioPlatform(IDesktopAudioPlatform inner) : ID
             ObjectDisposedException.ThrowIf(disposed, this);
             if (capture?.Selection is CaptureSelection.SystemMix selection)
                 await capture.SwitchAsync(selection with { MuteLocalOutput = value }, token).ConfigureAwait(false);
+            else if (capture?.Selection is CaptureSelection.Process process)
+                await capture.SwitchAsync(process with { MuteLocalOutput = value }, token).ConfigureAwait(false);
             muted = value;
         }
         finally { gate.Release(); }
@@ -44,10 +47,13 @@ public sealed class SharedDesktopAudioPlatform(IDesktopAudioPlatform inner) : ID
         {
             ObjectDisposedException.ThrowIf(disposed, this);
             var selection = subscriber.Selection is CaptureSelection.SystemMix system
-                ? system with { MuteLocalOutput = muted } : subscriber.Selection;
+                ? system with { MuteLocalOutput = muted } : subscriber.Selection is CaptureSelection.Process app
+                    ? app with { MuteLocalOutput = muted } : subscriber.Selection;
             if (capture is null)
             {
-                buffer = new(AudioChannelRoute.Stereo, PcmFrameFormat.MiPlayAac, maximumMilliseconds: 44);
+                // Capacity covers short capture-worker scheduling jitter; reads
+                // below drain immediately rather than adding this to playback delay.
+                buffer = new(AudioChannelRoute.Stereo, PcmFrameFormat.MiPlayAac, maximumMilliseconds: 128);
                 lifetime = new();
                 capture = new(inner, selection);
                 capture.CaptureFailed += OnFailure;
@@ -55,13 +61,13 @@ public sealed class SharedDesktopAudioPlatform(IDesktopAudioPlatform inner) : ID
                 {
                     // The shared tap lifetime must not belong to the first speaker.
                     await capture.StartAsync(buffer, lifetime.Token).ConfigureAwait(false);
-                    pump = PumpAsync(buffer, lifetime.Token);
                 }
                 catch { await ReleaseCaptureAsync().ConfigureAwait(false); throw; }
             }
             else await capture.SwitchAsync(selection, token).ConfigureAwait(false);
             token.ThrowIfCancellationRequested();
             lock (sync) subscribers.Add(subscriber, destination);
+            pump ??= PumpAsync(buffer!, lifetime!.Token);
         }
         catch
         {
@@ -78,7 +84,9 @@ public sealed class SharedDesktopAudioPlatform(IDesktopAudioPlatform inner) : ID
         {
             while (!token.IsCancellationRequested)
             {
-                var frame = await source.ReadFrameWithTimingOrSilenceAsync(token).ConfigureAwait(false);
+                // The group encoder owns pacing and recovery silence. The tap
+                // hub only transfers real capture, including short arrival bursts.
+                var frame = await source.ReadCapturedFrameAsync(token).ConfigureAwait(false);
                 lock (sync)
                     foreach (var destination in subscribers.Values.Distinct())
                         destination.Write(frame.Bytes, frame.PresentationTimeMicroseconds,
@@ -112,6 +120,7 @@ public sealed class SharedDesktopAudioPlatform(IDesktopAudioPlatform inner) : ID
         {
             capture.CaptureFailed -= OnFailure;
             await capture.DisposeAsync().ConfigureAwait(false);
+            Volatile.Write(ref lastCaptureHealth, capture.Health);
             capture = null;
         }
         if (pump is not null) await pump.ConfigureAwait(false);
@@ -137,7 +146,7 @@ public sealed class SharedDesktopAudioPlatform(IDesktopAudioPlatform inner) : ID
     {
         public CaptureSelection Selection => selection;
         public bool IsRunning { get; private set; }
-        public CaptureHealth Health => owner.capture?.Health ?? new(DateTimeOffset.UtcNow, null, null, 0);
+        public CaptureHealth Health => owner.capture?.Health ?? Volatile.Read(ref owner.lastCaptureHealth) ?? new(DateTimeOffset.UtcNow, null, null, 0);
         public event EventHandler<Exception>? CaptureFailed;
         public void Fail(Exception failure) => CaptureFailed?.Invoke(this, failure);
         public async Task StartAsync(PcmFrameBuffer destination, CancellationToken token)

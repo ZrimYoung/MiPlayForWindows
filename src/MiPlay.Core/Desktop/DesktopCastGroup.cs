@@ -1,12 +1,13 @@
 using DLNACast.Core.Abstractions;
 using DLNACast.Core.MiPlay;
 using DLNACast.Core.Models;
+using DLNACast.Core.Audio;
 
 namespace MiPlay.Desktop.Services;
 
 /// <summary>Owns the encoder across receiver retries, joins and departures.</summary>
 internal sealed class DesktopCastGroup(IDesktopAudioPlatform platform,
-    IAacEncoderFactory? encoderFactory = null) : IAsyncDisposable
+    IAacEncoderFactory? encoderFactory = null, Func<bool>? prepareChannelRoutes = null) : IAsyncDisposable
 {
     private readonly SemaphoreSlim gate = new(1, 1);
     private readonly HashSet<Entry> entries = [];
@@ -21,11 +22,12 @@ internal sealed class DesktopCastGroup(IDesktopAudioPlatform platform,
             ObjectDisposedException.ThrowIf(disposed, this);
             if (current is null || !current.Session.IsAvailable)
             {
-                var group = await MiPlaySharedAudioSession.StartAsync(platform, request.Selection,
-                    request.FfmpegPath, participantCount: 1, cancellationToken: token,
+                var routes = prepareChannelRoutes?.Invoke() == true ? Enum.GetValues<AudioChannelRoute>() : new[] { request.ChannelRoute };
+                var group = await MiPlaySharedAudioSession.StartAsync(platform, request.Selection, routes,
+                    request.FfmpegPath, cancellationToken: token,
                     encoderFactory: encoderFactory ?? new FfmpegAacEncoderFactory(
                         OperatingSystem.IsWindows() ? "aac_mf" : "aac"),
-                    drainBeforeMediaReady: true, disposeWhenEmpty: false, audioBitRate: request.AudioBitRate).ConfigureAwait(false);
+                    drainBeforeMediaReady: true, disposeWhenEmpty: false, audioBitRate: request.AudioBitRate, startupParticipantCount: 1).ConfigureAwait(false);
                 current = new(group, request.AudioBitRate);
                 entries.Add(current);
             }

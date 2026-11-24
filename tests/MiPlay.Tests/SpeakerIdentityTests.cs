@@ -13,7 +13,7 @@ public sealed class SpeakerIdentityTests
     public async Task RuntimeIdentityWinsOverAnOlderInFlightDiscoveryReply()
     {
         var reply = new TaskCompletionSource<SpeakerIdentity?>(TaskCreationOptions.RunContinuationsAsynchronously);
-        var discovery = new SpeakerDiscovery { ReadIdentity = (_, _) => reply.Task };
+        var discovery = new SpeakerDiscovery { ReadIdentity = (_, _, _) => reply.Task };
         var uri = new Uri("http://192.0.2.2:8899/");
         var endpoint = new UpnpServiceEndpoint("", uri, uri, uri);
         var speaker = new Speaker("stable", "Art", "", new RendererDevice("stable", "Art", "Xiaomi", "",
@@ -71,7 +71,7 @@ public sealed class SpeakerIdentityTests
         var identity = new SpeakerIdentity("Art R", "L09A", "pair", "客厅立体声", "right", false);
         var discovery = new SpeakerDiscovery {
             Now = () => time, CanReadIdentity = _ => idle,
-            ReadIdentity = (_, _) => { queries++; return Task.FromResult<SpeakerIdentity?>(identity); }
+            ReadIdentity = (_, _, _) => { queries++; return Task.FromResult<SpeakerIdentity?>(identity); }
         };
         var uri = new Uri("http://192.0.2.2:8899/");
         var endpoint = new UpnpServiceEndpoint("", uri, uri, uri);

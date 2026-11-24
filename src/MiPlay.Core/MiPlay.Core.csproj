@@ -8,6 +8,7 @@
     <InternalsVisibleTo Include="DLNACast.Core" />
     <InternalsVisibleTo Include="DLNACast.Tests" />
     <InternalsVisibleTo Include="MiPlay.Tests" />
+    <InternalsVisibleTo Include="MiPlay.Mac.Tests" />
     <InternalsVisibleTo Include="MiPlay.Platform.Mac" />
     <InternalsVisibleTo Include="MiPlay.Platform.Windows" />
   </ItemGroup>

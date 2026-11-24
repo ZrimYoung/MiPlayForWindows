@@ -45,6 +45,16 @@ with tempfile.TemporaryDirectory(prefix="miplay-ipc-") as profile:
         initial = event("snapshot")["snapshot"]
         assert not any(s["selected"] for s in initial["speakers"])
         assert initial["synchronizedPlayback"]
+        assert initial["audioSource"]["mode"] == "system"
+        assert not initial["dlnaEnabled"]
+        for command in [
+            {"command":"audioSource", "value":{"mode":"process", "processId":-1}},
+            {"command":"channelRoute", "id":"missing", "value":"Bogus"}]:
+            child.stdin.write((json.dumps(command) + "\n").encode()); child.stdin.flush()
+            assert event("error")["message"]
+        child.stdin.write(b'{"command":"audioSources"}\n'); child.stdin.flush()
+        source_snapshot = event("snapshot")["snapshot"]
+        assert not any(s["selected"] for s in source_snapshot["speakers"])
         child.stdin.write(b'{"command":"synchronizedPlayback","value":false}\n')
         child.stdin.flush()
         deadline = time.monotonic() + 8

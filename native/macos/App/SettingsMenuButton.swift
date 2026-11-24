@@ -29,23 +29,8 @@ struct SettingsMenuButton: NSViewRepresentable {
             }
             add("投放设置…", #selector(showSettings))
             menu.addItem(.separator())
-            add("显示系统媒体信息（实验）", #selector(toggleMedia), checked: engine.media.enabled)
-            add("读取 Apple Music 歌词（实验）", #selector(toggleLyrics), checked: engine.media.lyricsEnabled)
-            if engine.media.lyricsEnabled {
-                let status = NSMenuItem(title: engine.media.lyricsStatus, action: nil, keyEquivalent: "")
-                status.isEnabled = false; menu.addItem(status)
-            }
-            add("同步投放（切换后需重新选音箱）", #selector(toggleSync),
-                checked: engine.snapshot.synchronizedPlayback, enabled: engine.connected)
-            menu.addItem(.separator())
-            let heading = NSMenuItem(title: "投放音质", action: nil, keyEquivalent: "")
-            heading.isEnabled = false; menu.addItem(heading)
-            for (rate, label) in [(256000, "256 kbps · 标准"), (320000, "320 kbps · 高音质"), (512000, "512 kbps · 实验性")] {
-                add(label, #selector(selectQuality(_:)), checked: engine.snapshot.audioBitRate == rate,
-                    enabled: engine.connected, tag: rate)
-            }
-            let hint = NSMenuItem(title: "切换音质会停止投放，需重新选择音箱", action: nil, keyEquivalent: "")
-            hint.isEnabled = false; menu.addItem(hint)
+            add("重新扫描音箱", #selector(scan), enabled: engine.connected)
+            add("停止全部投放", #selector(stopAll), enabled: engine.connected && engine.snapshot.speakers.contains { $0.selected })
             menu.addItem(.separator())
             add("系统音频权限…", #selector(openPermission))
             add("导出诊断…", #selector(exportDiagnostics), enabled: engine.connected)
@@ -55,10 +40,8 @@ struct SettingsMenuButton: NSViewRepresentable {
             makeMenu().popUp(positioning: nil, at: NSPoint(x: 0, y: sender.bounds.minY - 4), in: sender)
         }
         @objc func showSettings() { NotificationCenter.default.post(name: .miplayShowSettings, object: nil) }
-        @objc func toggleMedia() { engine.media.enabled.toggle() }
-        @objc func toggleLyrics() { engine.media.lyricsEnabled.toggle() }
-        @objc func toggleSync() { engine.send("synchronizedPlayback", value: !engine.snapshot.synchronizedPlayback) }
-        @objc func selectQuality(_ sender: NSMenuItem) { engine.send("audioBitRate", value: sender.tag) }
+        @objc func scan() { engine.send("scan") }
+        @objc func stopAll() { engine.stopAll() }
         @objc func exportDiagnostics() { engine.send("export") }
         @objc func openPermission() {
             NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture")!)

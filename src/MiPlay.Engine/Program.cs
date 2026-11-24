@@ -45,6 +45,10 @@ async Task HandleAsync(string line)
             case "mute": await controller.SetMutedAsync(root.GetProperty("value").GetBoolean()); break;
             case "synchronizedPlayback": await controller.SetSynchronizedPlaybackAsync(root.GetProperty("value").GetBoolean()); break;
             case "audioBitRate": await controller.SetAudioBitRateAsync(root.GetProperty("value").GetInt32()); break;
+            case "audioSource": await controller.SetAudioSourceAsync(root.GetProperty("value").Deserialize<DesktopAudioSource>(json) ?? throw new ArgumentException("缺少音源。")); break;
+            case "audioSources": await controller.RefreshAudioSourcesAsync(); break;
+            case "channelRoute": await controller.SetChannelRouteAsync(Id(), root.GetProperty("value").GetString() ?? ""); break;
+            case "dlnaEnabled": await controller.SetDlnaEnabledAsync(root.GetProperty("value").GetBoolean()); break;
             case "media": controller.UpdateMedia(root.GetProperty("value").Deserialize<MiPlayMediaSnapshot>(json)); break;
             case "scan": await controller.RefreshAsync(); break;
             case "stopAll": await controller.StopAllAsync(); break;

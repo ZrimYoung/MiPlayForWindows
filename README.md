@@ -2,9 +2,11 @@
 
 ## 本 fork：Windows / macOS 桌面测试版
 
-0.4 支持点选多台妙播音箱，逐台保存音量与播放延迟，并持续发现局域网设备。
-Mac 使用 SwiftUI 原生界面与菜单栏；Windows 使用 Avalonia 设备卡片。Mac 提供“仅音箱播放（实验）”。
-MiPlay 共享协议核心继续使用 C#，旧版 WinUI 程序保留作回归对照。
+0.6 桌面测试版支持多台妙播音箱、官方立体声组合、实时延迟与音量、系统/固定输出/单应用音源，以及可选 DLNA 投放。
+Mac 使用 SwiftUI 原生界面与菜单栏，提供 Apple Music 同步歌词与高清封面；Windows 使用 Avalonia 设备卡片。Mac 支持捕获并静音所选源（实验）。
+MiPlay 共享协议核心继续使用 C#，旧版 WinUI 程序保留作回归对照。新能力的真机验证边界见下方文档。
+
+0.6.3 的 Mac 采集层先保留系统实际交付的 PCM 格式与声道，发送适配器再转换为现有双声道路径；新增事件唤醒和明确的下混策略。最多32声道、不同采样精度的检查使用合成数据，不代表播放器已经输出多声道或接收端多声道投放已经验收。
 
 - 开发与打包：[desktop-development.md](docs/desktop-development.md)
 - 验证边界和目标设备：[desktop-validation.md](docs/desktop-validation.md)

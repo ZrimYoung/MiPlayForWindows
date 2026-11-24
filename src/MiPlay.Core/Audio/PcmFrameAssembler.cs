@@ -8,14 +8,28 @@ public sealed class PcmFrameAssembler(PcmFrameBuffer destination)
     private ulong _pendingPresentationTimeMicroseconds;
     private ulong _previousFramePresentationTimeMicroseconds;
     private bool _hasPreviousFrame;
+    private bool _pendingCaptureDiscontinuity;
 
     public void Push(ReadOnlySpan<byte> pcm) =>
         Push(pcm, PcmPresentationTimestamp.GetElapsedRealtimeNanoseconds());
 
     public void Push(
         ReadOnlySpan<byte> pcm,
-        ulong elapsedRealtimeNanoseconds)
+        ulong elapsedRealtimeNanoseconds) =>
+        Push(pcm, elapsedRealtimeNanoseconds, captureDiscontinuity: false);
+
+    public void Push(
+        ReadOnlySpan<byte> pcm,
+        ulong elapsedRealtimeNanoseconds,
+        bool captureDiscontinuity)
     {
+        if (captureDiscontinuity)
+        {
+            // Samples on either side of a capture break cannot form one codec
+            // frame. Keep the marker until a new complete frame is published.
+            _pendingCount = 0;
+            _pendingCaptureDiscontinuity = true;
+        }
         if (pcm.IsEmpty) return;
         var readPresentationTimeMicroseconds =
             PcmPresentationTimestamp.CalculateMicroseconds(
@@ -40,7 +54,7 @@ public sealed class PcmFrameAssembler(PcmFrameBuffer destination)
 
             if (_pendingCount == _pending.Length)
             {
-                var captureDiscontinuity = _hasPreviousFrame &&
+                var frameDiscontinuity = _pendingCaptureDiscontinuity || _hasPreviousFrame &&
                     ExceedsTabletRecoveryWindow(
                         _pendingPresentationTimeMicroseconds -
                         Math.Min(
@@ -49,11 +63,12 @@ public sealed class PcmFrameAssembler(PcmFrameBuffer destination)
                 _destination.Write(
                     _pending,
                     _pendingPresentationTimeMicroseconds,
-                    captureDiscontinuity: captureDiscontinuity);
+                    captureDiscontinuity: frameDiscontinuity);
                 _previousFramePresentationTimeMicroseconds =
                     _pendingPresentationTimeMicroseconds;
                 _hasPreviousFrame = true;
                 _pendingCount = 0;
+                _pendingCaptureDiscontinuity = false;
             }
         }
     }

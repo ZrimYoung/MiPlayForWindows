@@ -62,11 +62,21 @@ enum MediaSnapshot {
         return (nil, "封面超过大小限制，暂不发送")
     }
 
-    static func fullSnapshot(from line: Data) -> [String: Any]? {
+    struct Update {
+        let values: [String: Any]
+        let explicitClear: Bool
+    }
+    static func update(from line: Data) -> Update? {
         guard let event = (try? JSONSerialization.jsonObject(with: line)) as? [String: Any],
               event["type"] as? String == "data", event["diff"] as? Bool == false else { return nil }
-        if event["payload"] is NSNull { return [:] }
-        return event["payload"] as? [String: Any]
+        if event["payload"] is NSNull { return Update(values: [:], explicitClear: true) }
+        guard let values = event["payload"] as? [String: Any] else { return nil }
+        return Update(values: values, explicitClear: false)
+    }
+    static func fullSnapshot(from line: Data) -> [String: Any]? { update(from: line)?.values }
+    static func bundleIdentifier(_ values: [String: Any]) -> String {
+        let parent = values["parentApplicationBundleIdentifier"] as? String ?? ""
+        return parent.isEmpty ? values["bundleIdentifier"] as? String ?? "" : parent
     }
 
     static func decode(_ values: [String: Any], artworkOptions: ArtworkOptions = ArtworkOptions()) -> NowPlayingItem? {
@@ -77,7 +87,7 @@ enum MediaSnapshot {
                   value.doubleValue >= 0 else { return nil }
             return value.doubleValue
         }
-        let bundle = text("parentApplicationBundleIdentifier").isEmpty ? text("bundleIdentifier") : text("parentApplicationBundleIdentifier")
+        let bundle = bundleIdentifier(values)
         var source = "系统媒体"
         if let name = NSWorkspace.shared.runningApplications.first(where: { $0.bundleIdentifier == bundle })?.localizedName { source = name }
         var artwork: NSImage?

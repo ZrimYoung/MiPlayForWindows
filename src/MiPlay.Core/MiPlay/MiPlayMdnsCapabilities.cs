@@ -1,3 +1,4 @@
+using System.Buffers.Binary;
 using System.Globalization;
 
 namespace DLNACast.Core.MiPlay;
@@ -31,6 +32,24 @@ public sealed record MiPlayMdnsCapabilities(
         "urn:aiot-spec-v3:com.mi.idm:service:miplay-audio:00017803:1.0";
 
     public bool SupportsMiPlayAudio => ApplicationIds.Contains(MiPlayAudioApplicationId);
+
+    /// <summary>
+    /// Port from the verified compact app-5 descriptor: 04 83 followed by a
+    /// big-endian control port. Other payload layouts remain unclassified;
+    /// neither their first bytes nor the mi-connect DNS SRV port are inferred.
+    /// </summary>
+    public int? AdvertisedControlPort
+    {
+        get
+        {
+            if (!SupportsMiPlayAudio ||
+                !ApplicationData.TryGetValue(MiPlayAudioApplicationId, out var data) ||
+                data.Length != 4 || data[0] != 0x04 || data[1] != 0x83)
+                return null;
+            var port = BinaryPrimitives.ReadUInt16BigEndian(data.AsSpan(2, 2));
+            return port == 0 ? null : port;
+        }
+    }
 
     public bool RequiresTransportSecurity =>
         SecurityMode is MiConnectSecurityMode.Transport or MiConnectSecurityMode.CommunicationAndTransport;

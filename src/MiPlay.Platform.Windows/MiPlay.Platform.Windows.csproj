@@ -7,6 +7,9 @@
     <ProjectReference Include="../MiPlay.Core/MiPlay.Core.csproj" />
     <PackageReference Include="NAudio" Version="2.3.0" />
     <PackageReference Include="Microsoft.Win32.SystemEvents" Version="10.0.0" />
+    <Compile Include="../DLNACast.Core/Audio/AudioSourceCatalog.cs" Link="AudioSourceCatalog.cs" />
+    <Compile Include="../DLNACast.Core/Audio/ProcessLoopbackCaptureSource.cs" Link="ProcessLoopbackCaptureSource.cs" />
+    <Compile Include="../DLNACast.Core/Audio/ProcessLoopbackInterop.cs" Link="ProcessLoopbackInterop.cs" />
     <Compile Include="../DLNACast.Core/Audio/SystemLoopbackCaptureSource.cs" Link="SystemLoopbackCaptureSource.cs" />
     <Compile Include="../DLNACast.Core/MiPlay/MiPlayMediaPacingClock.cs" Link="WindowsMediaPacingClock.cs" />
   </ItemGroup>

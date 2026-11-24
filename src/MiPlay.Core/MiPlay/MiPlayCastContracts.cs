@@ -53,7 +53,17 @@ public sealed record MiPlayCastDiagnostics(
     bool? ContainsAudiblePcm = null,
     int EncoderPendingInputFrames = 0,
     int EncoderBufferedAccessUnits = 0,
-    long PrePlayDiscardedAccessUnits = 0);
+    long PrePlayDiscardedAccessUnits = 0,
+    string? StartupPhase = null,
+    double? StartupElapsedMilliseconds = null,
+    double MaximumEncodedReadWaitMilliseconds = 0,
+    double MaximumMediaWriteMilliseconds = 0,
+    double MaximumSharedSendWaitMilliseconds = 0,
+    long SourcePcmOverruns = 0,
+    long SourcePcmUnderruns = 0)
+{
+    public AudioCaptureDiagnostics? AudioCapture { get; init; }
+}
 
 public sealed record MiPlaySystemAudioRequest(
     RendererDevice Renderer,
@@ -69,6 +79,8 @@ public sealed record MiPlaySystemAudioRequest(
     {
         MiPlayAudioQuality.Validate(AudioBitRate);
         ArgumentNullException.ThrowIfNull(Renderer);
+        if (Renderer.MiPlayControlPort is <= 0 or > ushort.MaxValue)
+            throw new ArgumentOutOfRangeException(nameof(Renderer), "Invalid MiPlay control port.");
         ArgumentNullException.ThrowIfNull(Selection);
         ArgumentException.ThrowIfNullOrWhiteSpace(FfmpegPath);
         if (!Enum.IsDefined(ChannelRoute))

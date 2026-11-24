@@ -19,13 +19,23 @@
     <Border Grid.Row="1" Background="#263644" CornerRadius="22" Padding="20">
       <StackPanel Spacing="12">
         <TextBlock Text="系统音频" FontSize="17" FontWeight="SemiBold" />
-        <TextBlock Text="音乐、视频和浏览器 · 跟随默认输出设备" Foreground="#ABBAC8" FontSize="12" />
+        <Expander Header="音源设置" HorizontalAlignment="Stretch">
+          <StackPanel Spacing="10" Margin="0,8,0,0">
+            <ComboBox ItemsSource="{Binding CaptureModes}" SelectedIndex="{Binding CaptureModeIndex}" HorizontalAlignment="Stretch" />
+            <ComboBox ItemsSource="{Binding OutputDevices}" SelectedItem="{Binding SelectedOutput}" IsVisible="{Binding IsSystemSource}" PlaceholderText="选择输出设备" HorizontalAlignment="Stretch" />
+            <ComboBox ItemsSource="{Binding CandidateProcesses}" SelectedItem="{Binding SelectedProcess}" IsVisible="{Binding IsProcessSource}" PlaceholderText="选择正在出声的应用" HorizontalAlignment="Stretch" />
+            <CheckBox Content="包含应用的辅助进程" IsChecked="{Binding IncludeChildren}" IsVisible="{Binding IsProcessSource}" />
+            <StackPanel Orientation="Horizontal" Spacing="8"><Button Content="刷新音源" Command="{Binding RefreshAudioSourcesCommand}" /><Button Content="应用音源" Command="{Binding ApplyAudioSourceCommand}" /></StackPanel>
+            <TextBlock Text="更改音源会停止全部投放，需重新选择音箱。固定输出断开或所选应用退出时停止投放。" FontSize="11" Foreground="#ABBAC8" TextWrapping="Wrap" />
+          </StackPanel>
+        </Expander>
         <ToggleSwitch Content="仅音箱播放（实验）" OnContent="已开启" OffContent="已关闭" Foreground="#F0F3F7" IsChecked="{Binding MuteLocalOutput}" IsEnabled="{Binding SupportsLocalMute}" />
         <TextBlock Text="{Binding LocalOutputHint}" Foreground="#ABBAC8" FontSize="11" TextWrapping="Wrap" />
-        <ComboBox ItemsSource="{Binding AudioQualities}" SelectedIndex="{Binding AudioQualityIndex}" HorizontalAlignment="Stretch" />
+        <ComboBox Name="AudioQualityChoice" ItemsSource="{Binding AudioQualities}" SelectedIndex="{Binding AudioQualityIndex}" HorizontalAlignment="Stretch" />
         <TextBlock Text="切换音质会停止投放，需重新选择音箱。512 kbps 为实验性，兼容性待验证。" FontSize="11" Foreground="#ABBAC8" TextWrapping="Wrap" />
         <ToggleSwitch Content="同步投放" IsChecked="{Binding SynchronizedPlayback}" Foreground="#F0F3F7"
-                      ToolTip.Tip="使用共同时间线同步多台音箱；关闭使用兼容模式。切换后需重新选择音箱。" />
+                      ToolTip.Tip="仅 MiPlay 使用共同时间线；关闭使用兼容模式。切换后需重新选择音箱。" />
+        <ToggleSwitch Content="发现 DLNA 设备（实验）" IsChecked="{Binding DlnaEnabled}" Foreground="#F0F3F7" ToolTip.Tip="DLNA 采用独立传输，不支持 MiPlay 同步和实时延迟。" />
       </StackPanel>
     </Border>
     <Grid Grid.Row="2" RowDefinitions="Auto,*" RowSpacing="12">
@@ -40,25 +50,32 @@
                 <StackPanel Spacing="14">
                   <Button Command="{Binding ToggleCommand}" Background="Transparent" BorderThickness="0" Padding="0" HorizontalAlignment="Stretch" HorizontalContentAlignment="Stretch">
                     <Grid ColumnDefinitions="*,Auto" ColumnSpacing="12">
-                      <StackPanel Spacing="5"><TextBlock Text="{Binding Name}" FontSize="18" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" /><TextBlock Text="{Binding GroupLabel}" IsVisible="{Binding HasGroup}" FontSize="11" Foreground="#AFC8FF" TextWrapping="Wrap" /><TextBlock Text="{Binding StateText}" FontSize="11" Opacity="0.7" TextWrapping="Wrap" /></StackPanel>
-                      <CheckBox Grid.Column="1" IsChecked="{Binding Selected, Mode=OneWay}" IsHitTestVisible="False" Focusable="False" VerticalAlignment="Center" />
+                      <StackPanel Spacing="5"><TextBlock Text="{Binding TransportLabel}" FontSize="10" Opacity="0.65" /><TextBlock Text="{Binding Name}" FontSize="18" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" /><TextBlock Text="{Binding GroupLabel}" IsVisible="{Binding HasGroup}" FontSize="11" Foreground="#AFC8FF" TextWrapping="Wrap" /><TextBlock Text="{Binding StateText}" FontSize="11" Opacity="0.7" TextWrapping="Wrap" /></StackPanel>
+                      <CheckBox Name="SpeakerSelection" Grid.Column="1" IsChecked="{Binding Selected, Mode=OneWay}" IsHitTestVisible="False" Focusable="False" VerticalAlignment="Center" />
                     </Grid>
                   </Button>
                   <StackPanel Spacing="8" IsVisible="{Binding Selected}">
                     <Grid ColumnDefinitions="*,Auto"><TextBlock Text="音量" FontSize="12" /><TextBlock Grid.Column="1" Text="{Binding VolumeLabel}" FontSize="12" /></Grid>
                     <Slider Minimum="0" Maximum="100" Value="{Binding Volume}" Height="28" />
-                    <Grid ColumnDefinitions="*,Auto,Auto" ColumnSpacing="10">
+                    <Grid ColumnDefinitions="*,Auto,Auto" ColumnSpacing="10" IsVisible="{Binding SupportsDelay}">
                       <TextBlock Text="播放延迟" FontSize="12" VerticalAlignment="Center" />
                       <TextBlock Grid.Column="1" Text="{Binding DelayLabel}" FontSize="12" VerticalAlignment="Center" Opacity="0.65" />
                       <Button Grid.Column="2" Content="{Binding ExpandLabel}" Command="{Binding ToggleDelayCommand}" Padding="10,5" />
                     </Grid>
-                      <StackPanel Spacing="10" IsVisible="{Binding Expanded}" Margin="0,4,0,0">
+                      <StackPanel Spacing="10" IsVisible="{Binding Expanded}" IsEnabled="{Binding SupportsDelay}" Margin="0,4,0,0">
                         <Grid ColumnDefinitions="*,Auto"><TextBlock Text="播放延迟" FontSize="12" /><TextBlock Grid.Column="1" Text="{Binding DelayLabel}" FontWeight="SemiBold" /></Grid>
                         <Slider Minimum="0" Maximum="2000" TickFrequency="10" IsSnapToTickEnabled="True" Value="{Binding Delay}" Height="28" />
                         <StackPanel Orientation="Horizontal" Spacing="6"><Button Content="200 ms" Command="{Binding FastCommand}" Padding="10,6" /><Button Content="500 ms" Command="{Binding BalancedCommand}" Padding="10,6" /><Button Content="1000 ms" Command="{Binding StableCommand}" Padding="10,6" /></StackPanel>
                         <TextBlock Text="拖动即生效，无需重连；立体声组合一起调整。降低过多可能卡顿，设置自动记住。数值不代表实测总延迟。" FontSize="11" Opacity="0.7" TextWrapping="Wrap" />
                       </StackPanel>
                   </StackPanel>
+                  <Expander Header="声道与诊断" HorizontalAlignment="Stretch">
+                    <StackPanel Spacing="8" Margin="0,8,0,0">
+                      <ComboBox ItemsSource="{Binding ChannelRoutes}" SelectedIndex="{Binding ChannelRouteIndex}" IsVisible="{Binding CanSetChannelRoute}" HorizontalAlignment="Stretch" />
+                      <TextBlock Text="更改声道会停止全部投放，需重新选择音箱。" IsVisible="{Binding CanSetChannelRoute}" FontSize="11" Opacity="0.65" TextWrapping="Wrap" />
+                      <TextBlock Text="{Binding DiagnosticsText}" FontSize="11" Opacity="0.7" TextWrapping="Wrap" />
+                    </StackPanel>
+                  </Expander>
                 </StackPanel>
               </Border>
             </DataTemplate></ItemsControl.ItemTemplate>

@@ -58,7 +58,7 @@ public sealed class WindowTests
                 await WaitFor(() => controller.Snapshot.Speakers[0].Volume == 38);
                 Assert.False(vm.HasError);
                 Dispatcher.UIThread.RunJobs();
-                Assert.Equal(2, window.GetVisualDescendants().OfType<CheckBox>().Count(c => c.IsChecked == true));
+                Assert.Equal(2, window.GetVisualDescendants().OfType<CheckBox>().Count(c => c.Name == "SpeakerSelection" && c.IsChecked == true));
                 Assert.True(vm.StopCommand.CanExecute(null));
                 var screenshot = Environment.GetEnvironmentVariable("MIPLAY_UI_SNAPSHOT");
                 if (!string.IsNullOrEmpty(screenshot))
@@ -68,7 +68,7 @@ public sealed class WindowTests
                     Assert.NotNull(bitmap);
                     bitmap.Save(screenshot, new Avalonia.Media.Imaging.PngBitmapEncoderOptions());
                 }
-                var quality = Assert.Single(window.GetVisualDescendants().OfType<ComboBox>());
+                var quality = window.FindControl<ComboBox>("AudioQualityChoice")!;
                 quality.SelectedIndex = 2;
                 await WaitFor(() => controller.Snapshot.AudioBitRate == 512000);
                 await WaitFor(() => vm.Speakers.All(s => !s.Selected));
@@ -79,6 +79,22 @@ public sealed class WindowTests
                 Assert.False(vm.StopCommand.CanExecute(null));
                 Assert.Equal(200, controller.Snapshot.Speakers[0].DelayMilliseconds);
                 Assert.Equal(38, controller.Snapshot.Speakers[0].Volume);
+                await controller.RefreshAudioSourcesAsync();
+                Dispatcher.UIThread.RunJobs();
+                Assert.Equal(3, vm.OutputDevices.Count);
+                Assert.Equal(2, vm.CandidateProcesses.Count);
+                vm.CaptureModeIndex = 1;
+                vm.SelectedProcess = vm.CandidateProcesses.Single(p => p.ProcessId == 101);
+                Assert.True(vm.ApplyAudioSourceCommand.CanExecute(null));
+                vm.ApplyAudioSourceCommand.Execute(null);
+                await WaitFor(() => controller.Snapshot.AudioSource?.ProcessId == 101);
+                Assert.Equal("process", controller.Snapshot.AudioSource!.Mode);
+                Assert.All(controller.Snapshot.Speakers, s => Assert.False(s.Selected));
+                vm.DlnaEnabled = true;
+                await WaitFor(() => controller.Snapshot.DlnaEnabled);
+                first.ChannelRouteIndex = 1;
+                await WaitFor(() => controller.Snapshot.Speakers[0].ChannelRoute == "LeftAsMono");
+                Assert.All(controller.Snapshot.Speakers, s => Assert.False(s.Selected));
             }
             finally { window.Close(); }
         }
@@ -104,8 +120,8 @@ public sealed class WindowTests
     {
         public event EventHandler? Suspending { add { } remove { } }
         public AudioSourceItem GetDefaultOutputDevice() => new("test", "default");
-        public IReadOnlyList<AudioSourceItem> GetOutputDevices() => [];
-        public IReadOnlyList<AudioSourceItem> GetCandidateProcesses() => [];
+        public IReadOnlyList<AudioSourceItem> GetOutputDevices() => [new("test", "default"), new("fixed", "USB device")];
+        public IReadOnlyList<AudioSourceItem> GetCandidateProcesses() => [new("process:101", "Music", 101), new("process:102", "Browser", 102)];
         public IAudioCaptureSource CreateCapture(CaptureSelection selection) => throw new InvalidOperationException("UI tests must not capture audio.");
         public IMediaPacingClock CreateMediaClock() => new MonotonicMediaPacingClock();
         public void Dispose() { }

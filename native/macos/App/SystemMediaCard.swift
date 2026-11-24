@@ -3,12 +3,14 @@ import SwiftUI
 /// Matches the compact layout of macOS Now Playing; uses the observed player state.
 struct SystemMediaCard: View {
     @ObservedObject var media: NowPlayingMonitor
+    var fallbackSubtitle = "此 Mac 正在播放的所有声音"
     @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var scrubbing = false
     @State private var scrubPosition = 0.0
     @State private var scrubIdentity = ""
     private var subtitle: String {
-        guard let item = media.item else { return "此 Mac 正在播放的所有声音" }
+        guard let item = media.item else { return fallbackSubtitle }
         let text = [item.artist, item.album].filter { !$0.isEmpty }.joined(separator: " – ")
         return text.isEmpty ? item.source : text
     }
@@ -17,13 +19,15 @@ struct SystemMediaCard: View {
             HStack(spacing: 14) {
                 artwork
                 VStack(alignment: .leading, spacing: 5) {
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(media.item?.title ?? "系统音频")
-                            .font(.system(size: 14, weight: .semibold)).lineLimit(1)
-                            .help(media.item?.title ?? "系统音频")
-                        Text(subtitle).font(.system(size: 11)).foregroundStyle(.secondary)
-                            .lineLimit(1).help(subtitle)
-                    }
+                    ZStack(alignment: .leading) {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(media.item?.title ?? "系统音频")
+                                .font(.system(size: 14, weight: .semibold)).lineLimit(1)
+                                .help(media.item?.title ?? "系统音频")
+                            Text(subtitle).font(.system(size: 11)).foregroundStyle(.secondary)
+                                .lineLimit(1).help(subtitle)
+                        }.id(textIdentity).transition(.opacity)
+                    }.animation(reduceMotion || media.item == nil ? nil : .easeInOut(duration: 0.22), value: textIdentity)
                     HStack {
                         transport(.previous, symbol: "backward.end.fill", label: "上一首")
                         Spacer(minLength: 4)
@@ -45,7 +49,16 @@ struct SystemMediaCard: View {
                     in: RoundedRectangle(cornerRadius: 17))
         .overlay(RoundedRectangle(cornerRadius: 17).strokeBorder(.primary.opacity(0.04), lineWidth: 0.5))
     }
+    private var textIdentity: String { [media.item?.bundleIdentifier ?? "", media.item?.title ?? "系统音频", subtitle].joined(separator: "\u{1f}") }
     private var artwork: some View {
+        ZStack {
+            artworkContent.id(MediaArtworkVisualIdentity(media.item)).transition(.opacity)
+        }
+        .frame(width: 112, height: 112).clipShape(RoundedRectangle(cornerRadius: 9))
+        .animation(reduceMotion || media.item == nil ? nil : .easeInOut(duration: 0.25), value: MediaArtworkVisualIdentity(media.item))
+        .accessibilityLabel("专辑封面")
+    }
+    private var artworkContent: some View {
         Group {
             if let artwork = media.item?.artwork {
                 Image(nsImage: artwork).resizable().aspectRatio(contentMode: .fill)
@@ -55,8 +68,7 @@ struct SystemMediaCard: View {
                     Image(systemName: "music.note").font(.system(size: 34, weight: .light)).foregroundStyle(.secondary)
                 }
             }
-        }.frame(width: 112, height: 112).clipShape(RoundedRectangle(cornerRadius: 9))
-            .accessibilityLabel("专辑封面")
+        }.frame(width: 112, height: 112)
     }
     private func transport(_ command: MediaTransportCommand, symbol: String, label: String) -> some View {
         Button { media.send(command) } label: {

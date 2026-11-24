@@ -6,6 +6,8 @@ public sealed record CaptureHealth(
     DateTimeOffset? LastAudiblePacketAt,
     long PacketCount)
 {
+    public AudioCaptureDiagnostics? AudioCapture { get; init; }
+
     public bool IsContinuouslySilent(TimeSpan duration, DateTimeOffset? now = null)
     {
         var reference = LastAudiblePacketAt ?? StartedAt;

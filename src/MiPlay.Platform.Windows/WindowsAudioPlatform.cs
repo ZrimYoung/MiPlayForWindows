@@ -16,16 +16,16 @@ public sealed class WindowsAudioPlatform : IDesktopAudioPlatform
     {
         if (e.Mode == PowerModes.Suspend) Suspending?.Invoke(this, EventArgs.Empty);
     }
-    public AudioSourceItem GetDefaultOutputDevice()
+    private readonly AudioSourceCatalog catalog = new();
+    public AudioSourceItem GetDefaultOutputDevice() => catalog.GetDefaultOutputDevice();
+    public IReadOnlyList<AudioSourceItem> GetOutputDevices() => catalog.GetOutputDevices();
+    public IReadOnlyList<AudioSourceItem> GetCandidateProcesses() => catalog.GetCandidateProcesses();
+    public IAudioCaptureSource CreateCapture(CaptureSelection selection)
     {
-        using var enumerator = new MMDeviceEnumerator();
-        using var device = enumerator.GetDefaultAudioEndpoint(DataFlow.Render, Role.Multimedia);
-        return new(device.ID, device.FriendlyName);
+        if (selection is CaptureSelection.SystemMix { MuteLocalOutput: true } or CaptureSelection.Process { MuteLocalOutput: true })
+            throw new NotSupportedException("Windows 采集暂不支持静音本机。");
+        return catalog.CreateCapture(selection);
     }
-    public IReadOnlyList<AudioSourceItem> GetOutputDevices() => [GetDefaultOutputDevice()];
-    public IReadOnlyList<AudioSourceItem> GetCandidateProcesses() => [];
-    public IAudioCaptureSource CreateCapture(CaptureSelection selection) => selection is CaptureSelection.SystemMix system
-        ? system.MuteLocalOutput ? throw new NotSupportedException("Windows 系统混音采集暂不支持静音本机。") : new SystemLoopbackCaptureSource(system) : throw new NotSupportedException("首版支持系统声音投放。");
     public IMediaPacingClock CreateMediaClock() => MiPlayMediaPacingClock.Create();
     public void Dispose() => SystemEvents.PowerModeChanged -= OnPowerModeChanged;
 }

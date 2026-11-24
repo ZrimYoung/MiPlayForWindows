@@ -6,9 +6,9 @@ using MiPlay.Desktop.Services;
 namespace MiPlay.Desktop;
 
 public sealed record SpeakerPreferences(string Name = "", string Model = "", int? Volume = null, int DelayMilliseconds = 1000,
-    string GroupId = "", string GroupName = "", string Channel = "");
+    string GroupId = "", string GroupName = "", string Channel = "", string ChannelRoute = "Stereo", string Transport = "MiPlay");
 public sealed record DesktopSettings(string? LastSpeakerId = null, bool MuteLocalOutput = false,
-    Dictionary<string, SpeakerPreferences>? Speakers = null, bool SynchronizedPlayback = true, int AudioBitRate = 256_000);
+    Dictionary<string, SpeakerPreferences>? Speakers = null, bool SynchronizedPlayback = true, int AudioBitRate = 256_000, DesktopAudioSource? AudioSource = null, bool DlnaEnabled = false);
 
 public sealed class DesktopStore
 {
@@ -55,7 +55,11 @@ public sealed class DesktopStore
                     diagnostic?.MinimumEncodedAccessUnitAgeMilliseconds, diagnostic?.MaximumEncodedAccessUnitAgeMilliseconds,
                     diagnostic?.MaximumInterReceiverSendSkewMilliseconds, diagnostic?.BufferedAccessUnits,
                     diagnostic?.EncoderPendingInputFrames, diagnostic?.EncoderBufferedAccessUnits,
-                    diagnostic?.PrePlayDiscardedAccessUnits
+                    diagnostic?.PrePlayDiscardedAccessUnits,
+                    diagnostic?.StartupPhase, diagnostic?.StartupElapsedMilliseconds,
+                    diagnostic?.MaximumEncodedReadWaitMilliseconds, diagnostic?.MaximumMediaWriteMilliseconds,
+                    diagnostic?.MaximumSharedSendWaitMilliseconds, diagnostic?.SourcePcmOverruns, diagnostic?.SourcePcmUnderruns,
+                    diagnostic?.AudioCapture
                 }) + Environment.NewLine);
             }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }

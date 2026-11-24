@@ -3,35 +3,6 @@ import AppKit
 
 private let accent = Color(red: 0.20, green: 0.43, blue: 0.95)
 
-private struct DesktopBackdrop: NSViewRepresentable {
-    func makeNSView(context: Context) -> NSVisualEffectView {
-        let view = NSVisualEffectView()
-        view.material = .hudWindow; view.blendingMode = .behindWindow; view.state = .active
-        return view
-    }
-    func updateNSView(_ nsView: NSVisualEffectView, context: Context) {}
-}
-private struct AmbientBackground: View {
-    @Environment(\.colorScheme) private var scheme
-    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
-    var body: some View {
-        GeometryReader { proxy in
-            ZStack {
-                if reduceTransparency { Color(nsColor: .windowBackgroundColor) }
-                else {
-                    DesktopBackdrop()
-                    (scheme == .dark ? Color(red: 0.075, green: 0.085, blue: 0.12) : Color(red: 0.96, green: 0.97, blue: 0.99)).opacity(0.90)
-                    RadialGradient(colors: [Color(red: 0.35, green: 0.55, blue: 0.95).opacity(scheme == .dark ? 0.23 : 0.16), .clear],
-                                   center: .topLeading, startRadius: 0, endRadius: 500)
-                    RadialGradient(colors: [Color(red: 0.69, green: 0.48, blue: 0.88).opacity(scheme == .dark ? 0.16 : 0.12), .clear],
-                                   center: .trailing, startRadius: 0, endRadius: 440)
-                    RadialGradient(colors: [Color(red: 0.30, green: 0.76, blue: 0.69).opacity(scheme == .dark ? 0.12 : 0.12), .clear],
-                                   center: .bottomLeading, startRadius: 0, endRadius: 380)
-                }
-            }.clipped()
-        }.ignoresSafeArea().allowsHitTesting(false)
-    }
-}
 private struct SmallGlass: ViewModifier {
     func body(content: Content) -> some View {
         if #available(macOS 26.0, *) {
@@ -87,11 +58,12 @@ struct CastPanel: View {
                     Button { engine.error = "" } label: { Image(systemName: "xmark") }.buttonStyle(.plain).accessibilityLabel("关闭提示")
                 }.foregroundStyle(.red).padding(10).background(.regularMaterial, in: RoundedRectangle(cornerRadius: 10))
             }
+            LiveDiagnosticsPanel(engine: engine)
             footer
         }
         .padding(.horizontal, 24).padding(.top, 20).padding(.bottom, 18)
         .frame(minWidth: 420, maxWidth: .infinity, minHeight: 610, maxHeight: .infinity)
-        .background(AmbientBackground()).tint(accent)
+        .background(PlaybackBackground(media: engine.media)).tint(accent)
         .animation(reduceMotion ? nil : .smooth(duration: 0.25), value: selectedCount)
     }
     private var header: some View {
@@ -109,7 +81,7 @@ struct CastPanel: View {
                 .modifier(SmallGlass()).help("更多设置")
         }
     }
-    private var nowPlaying: some View { SystemMediaCard(media: media) }
+    private var nowPlaying: some View { SystemMediaCard(media: media, fallbackSubtitle: engine.snapshot.captureDescription) }
     private var localOutput: some View {
         HStack(spacing: 12) {
             Image(systemName: engine.snapshot.muteLocalOutput ? "speaker.slash" : "laptopcomputer")
@@ -195,6 +167,12 @@ private struct SpeakerRow: View {
                         .background(card.selected ? accent.opacity(0.08) : Color.primary.opacity(0.035), in: RoundedRectangle(cornerRadius: 11))
                     VStack(alignment: .leading, spacing: 4) {
                         Text(card.name).font(.system(size: 13, weight: .semibold)).lineLimit(2).multilineTextAlignment(.leading)
+                        if card.isDlna {
+                            Text("DLNA · 独立传输").font(.system(size: 9, weight: .medium)).foregroundStyle(.secondary)
+                        } else if (card.channelRoute ?? "Stereo") != "Stereo" {
+                            Text(card.channelRoute == "LeftAsMono" ? "仅左声道" : "仅右声道")
+                                .font(.system(size: 9, weight: .medium)).foregroundStyle(accent)
+                        }
                         if let group = card.groupId, !group.isEmpty {
                             Text(card.channel == "left" ? "左声道" : card.channel == "right" ? "右声道" : "组合成员")
                                 .font(.system(size: 9, weight: .medium)).foregroundStyle(accent)
@@ -222,6 +200,10 @@ private struct SpeakerRow: View {
                     Text(card.volume == nil && !draggingVolume ? "—" : "\(Int(volume))%")
                         .font(.system(size: 10, weight: .medium)).monospacedDigit().foregroundStyle(.secondary).frame(width: 32, alignment: .trailing)
                 }
+                if card.isDlna {
+                    Text("DLNA 不支持 MiPlay 同步或实时延迟调节")
+                        .font(.system(size: 10)).foregroundStyle(.secondary)
+                } else {
                 HStack {
                     Image(systemName: "timer").font(.system(size: 10))
                     Text("播放延迟").font(.system(size: 10))
@@ -237,6 +219,7 @@ private struct SpeakerRow: View {
                     }.buttonStyle(.plain).help("调节这台音箱的延迟")
                 }.foregroundStyle(.secondary)
                 if expanded { delayControls.transition(.opacity.combined(with: .move(edge: .top))) }
+                }
             }
         }
         .padding(15)
@@ -252,4 +235,35 @@ private struct SpeakerRow: View {
     }
     private var delayControls: some View { RouteDelay(cards: [card], engine: engine) }
 
+}
+
+
+private struct LiveDiagnosticsPanel: View {
+    @ObservedObject var engine: EngineClient
+    @State private var expanded = false
+    private var cards: [SpeakerCard] { engine.snapshot.speakers.filter { $0.diagnostics != nil } }
+    var body: some View {
+        if !cards.isEmpty {
+            DisclosureGroup("实时诊断", isExpanded: $expanded) {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 12) {
+                        Text("缓冲量是软件内部排队量，不代表实际听到声音的延迟。")
+                            .font(.system(size: 10)).foregroundStyle(.secondary)
+                        ForEach(cards) { card in
+                            if let d = card.diagnostics {
+                                VStack(alignment: .leading, spacing: 5) {
+                                    Text("\(card.name) · \(card.isDlna ? "DLNA" : "MiPlay")")
+                                        .font(.system(size: 11, weight: .medium))
+                                    Text("缓冲 \(d.bufferedMilliseconds) ms · 欠载 \(d.underruns) · 溢出 \(d.overruns)")
+                                    Text("编码排队 \(d.encoderPendingInputFrames) 帧 · 待发送 \(d.encoderBufferedAccessUnits) 帧")
+                                    Text(String(format: "最大发送间隔 %.1f ms · 设备发送时间差 %.1f ms", d.maximumMediaSendGapMilliseconds, d.maximumInterReceiverSendSkewMilliseconds))
+                                    Text("已发送 \(d.wireBytes / 1024) KB · 音频帧 \(d.accessUnits)")
+                                }.font(.system(size: 10)).monospacedDigit().textSelection(.enabled)
+                            }
+                        }
+                    }.frame(maxWidth: .infinity, alignment: .leading).padding(.top, 8)
+                }.frame(maxHeight: 150)
+            }.font(.system(size: 11)).foregroundStyle(.secondary)
+        }
+    }
 }

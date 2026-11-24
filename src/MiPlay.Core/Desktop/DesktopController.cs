@@ -1,13 +1,19 @@
 using DLNACast.Core.MiPlay;
+using DLNACast.Core.Models;
+using DLNACast.Core.Audio;
+using MiPlay.Desktop.Services.Dlna;
 
 namespace MiPlay.Desktop.Services;
 
 public sealed record SpeakerCard(string Id, string Name, string Model, bool Online, bool Selected,
     string State, string Message, int? Volume, int DelayMilliseconds,
-    string GroupId = "", string GroupName = "", string Channel = "", string Failure = "None");
+    string GroupId = "", string GroupName = "", string Channel = "", string Failure = "None",
+    string Transport = "MiPlay", string ChannelRoute = "Stereo", DesktopDiagnostic? Diagnostics = null);
 public sealed record DesktopSnapshot(IReadOnlyList<SpeakerCard> Speakers, bool Scanning,
     string DiscoveryMessage, bool MuteLocalOutput, bool SupportsLocalMute, long Revision = 0,
-    bool SynchronizedPlayback = true, int AudioBitRate = MiPlayProtocolConstants.AacBitRate);
+    bool SynchronizedPlayback = true, int AudioBitRate = MiPlayProtocolConstants.AacBitRate,
+    DesktopAudioSource? AudioSource = null, IReadOnlyList<AudioSourceItem>? OutputDevices = null,
+    IReadOnlyList<AudioSourceItem>? CandidateProcesses = null, bool DlnaEnabled = false);
 
 /// <summary>UI-independent multi-speaker commands, persistence and continuous discovery.</summary>
 public sealed class DesktopController : IAsyncDisposable
@@ -25,6 +31,8 @@ public sealed class DesktopController : IAsyncDisposable
     private readonly List<Task> topologyStops = [];
     private readonly SemaphoreSlim configurationGate = new(1, 1);
     private readonly SemaphoreSlim scanGate = new(1, 1);
+    private readonly SemaphoreSlim audioSourcesGate = new(1, 1);
+    private IReadOnlyList<AudioSourceItem> outputDevices = [], candidateProcesses = [];
     private readonly SemaphoreSlim groupVolumeGate = new(1, 1);
     private readonly CancellationTokenSource lifetime = new();
     private readonly TimeSpan scanInterval, offlineAfter;
@@ -43,19 +51,23 @@ public sealed class DesktopController : IAsyncDisposable
         this.platform = new(platform); this.discovery = discovery; this.store = store;
         if (discovery is SpeakerDiscovery networkDiscovery)
             networkDiscovery.CanReadIdentity = id => { lock (sync) return !entries.TryGetValue(id, out var e) || !e.Wanted; };
-        group = new(this.platform);
-        this.sessionFactory = sessionFactory ?? CreateSession;
+        group = new(this.platform, prepareChannelRoutes: () => { lock (sync) return settings?.Speakers?.Values.Any(p => p.ChannelRoute != "Stereo" && string.IsNullOrEmpty(p.GroupId)) == true; });
+        this.sessionFactory = sessionFactory;
         this.encoderPath = encoderPath;
         this.scanInterval = scanInterval ?? TimeSpan.FromSeconds(2);
         this.offlineAfter = offlineAfter ?? TimeSpan.FromSeconds(18);
         this.now = now ?? (() => DateTimeOffset.UtcNow);
         settings = store.Load();
         if (!MiPlayAudioQuality.IsSupported(settings.AudioBitRate)) settings = settings with { AudioBitRate = 256_000 };
-        settings = settings with { Speakers = settings.Speakers ?? new(), MuteLocalOutput = settings.MuteLocalOutput && platform.SupportsLocalMute };
+        settings = settings with { Speakers = settings.Speakers ?? new(), MuteLocalOutput = settings.MuteLocalOutput && platform.SupportsLocalMute,
+            AudioSource = settings.AudioSource is { Mode: "system" } saved ? saved : new() };
+        if (discovery is SpeakerDiscovery allDiscovery) allDiscovery.DlnaEnabled = settings.DlnaEnabled;
         foreach (var (id, value) in settings.Speakers)
         {
             var preferences = value with { Volume = value.Volume is { } v ? Math.Clamp(v, 0, 100) : null,
-                DelayMilliseconds = Math.Clamp(value.DelayMilliseconds, 0, 2000) };
+                DelayMilliseconds = Math.Clamp(value.DelayMilliseconds, 0, 2000),
+                ChannelRoute = Enum.TryParse<AudioChannelRoute>(value.ChannelRoute, out var route) && Enum.IsDefined(route)
+                    && string.IsNullOrEmpty(value.GroupId) ? route.ToString() : "Stereo" };
             entries[id] = CreateEntry(id, preferences);
         }
         platform.Suspending += OnSuspending;
@@ -71,9 +83,10 @@ public sealed class DesktopController : IAsyncDisposable
                     e.Online, e.Wanted, e.Status.State.ToString(), e.Status.Message,
                     e.Status.State == DesktopCastState.Casting ? e.Service.ReceiverVolume ?? e.Preferences.Volume : e.Preferences.Volume,
                     e.Preferences.DelayMilliseconds,
-                    e.Preferences.GroupId, e.Preferences.GroupName, e.Preferences.Channel, e.Status.Failure.ToString())).ToArray(),
+                    e.Preferences.GroupId, e.Preferences.GroupName, e.Preferences.Channel, e.Status.Failure.ToString(),
+                    e.Speaker?.Transport ?? e.Preferences.Transport, e.Preferences.ChannelRoute, DesktopDiagnostic.From(e.Status.Diagnostics))).ToArray(),
                     scanning, discoveryMessage, settings.MuteLocalOutput, platform.SupportsLocalMute, ++revision,
-                    settings.SynchronizedPlayback, settings.AudioBitRate);
+                    settings.SynchronizedPlayback, settings.AudioBitRate, settings.AudioSource, outputDevices, candidateProcesses, settings.DlnaEnabled);
         }
     }
     public void StartDiscovery()
@@ -85,6 +98,8 @@ public sealed class DesktopController : IAsyncDisposable
             {
                 try
                 {
+                    try { await RefreshAudioSourcesAsync().ConfigureAwait(false); }
+                    catch (Exception ex) when (!lifetime.IsCancellationRequested) { store.Log("audio-sources", ex.Message); }
                     while (!lifetime.IsCancellationRequested)
                     {
                         await RefreshAsync().ConfigureAwait(false);
@@ -107,10 +122,11 @@ public sealed class DesktopController : IAsyncDisposable
             {
                 foreach (var speaker in found)
                 {
+                    if (speaker.Transport == "DLNA" && !settings.DlnaEnabled) continue;
                     if (!entries.TryGetValue(speaker.Id, out var entry))
-                        entries[speaker.Id] = entry = CreateEntry(speaker.Id, new(speaker.Name, speaker.Model));
+                        entries[speaker.Id] = entry = CreateEntry(speaker.Id, new(speaker.Name, speaker.Model, Transport: speaker.Transport));
                     entry.Speaker = speaker; entry.LastSeen = now(); entry.Online = true;
-                    entry.Preferences = entry.Preferences with { Name = speaker.Name, Model = speaker.Model };
+                    entry.Preferences = entry.Preferences with { Name = speaker.Name, Model = speaker.Model, Transport = speaker.Transport };
                     if (speaker.Identity is { } identity) ApplyIdentity(entry, identity);
                 }
                 foreach (var entry in entries.Values)
@@ -134,6 +150,8 @@ public sealed class DesktopController : IAsyncDisposable
         var entry = Get(id);
         lock (sync)
         {
+            if (selected && (entry.Speaker?.Transport ?? entry.Preferences.Transport) == "DLNA" && !settings.DlnaEnabled)
+                throw new InvalidOperationException("请先在设置中开启 DLNA 设备发现。");
             if (selected && modeChanging) throw new InvalidOperationException("正在切换投放模式，请稍后选择音箱。");
             if (selected && entry.TopologyChanging) throw new InvalidOperationException("组合信息正在更新，请稍后重新选择。");
             if (selected && !entry.Online) throw new InvalidOperationException("音箱离线，等待重新发现后再试。");
@@ -174,7 +192,7 @@ public sealed class DesktopController : IAsyncDisposable
                         entry.Preferences = entry.Preferences with { Volume = saved.Min() };
                         settings.Speakers![entry.Id] = entry.Preferences;
                     }
-                    store.Save(settings);
+                    SaveSettings();
                 }
             }
         }
@@ -215,7 +233,7 @@ public sealed class DesktopController : IAsyncDisposable
                     entry.Preferences = entry.Preferences with { Volume = volume };
                     settings.Speakers![entry.Id] = entry.Preferences;
                 }
-                store.Save(settings);
+                SaveSettings();
             }
             Publish();
             // The same absolute volume is applied to every member. A delayed acknowledgement
@@ -236,6 +254,8 @@ public sealed class DesktopController : IAsyncDisposable
     {
         if (milliseconds is < 0 or > 2000) throw new ArgumentOutOfRangeException(nameof(milliseconds));
         var entry = Get(id);
+        if ((entry.Speaker?.Transport ?? entry.Preferences.Transport) == "DLNA")
+            throw new NotSupportedException("DLNA 不支持 MiPlay 延迟微调。");
         long revision;
         lock (sync)
         {
@@ -269,7 +289,7 @@ public sealed class DesktopController : IAsyncDisposable
         try
         {
             await platform.SetMutedAsync(muted, lifetime.Token).ConfigureAwait(false);
-            lock (sync) { settings = settings with { MuteLocalOutput = muted }; store.Save(settings); }
+            lock (sync) { settings = settings with { MuteLocalOutput = muted }; SaveSettings(); }
         }
         finally { configurationGate.Release(); Publish(); }
     }
@@ -287,7 +307,7 @@ public sealed class DesktopController : IAsyncDisposable
             lock (sync)
             {
                 settings = settings with { SynchronizedPlayback = enabled };
-                store.Save(settings);
+                SaveSettings();
             }
             store.Log("playback-mode", enabled ? "shared-timeline" : "legacy-independent");
         }
@@ -301,7 +321,7 @@ public sealed class DesktopController : IAsyncDisposable
         {
             lock (sync) { if (settings.AudioBitRate == value) return; modeChanging = true; }
             await StopAllAsync().ConfigureAwait(false);
-            lock (sync) { settings = settings with { AudioBitRate = value }; store.Save(settings); }
+            lock (sync) { settings = settings with { AudioBitRate = value }; SaveSettings(); }
         }
         finally { lock (sync) modeChanging = false; configurationGate.Release(); Publish(); }
     }
@@ -321,12 +341,90 @@ public sealed class DesktopController : IAsyncDisposable
             finally { entry.Gate.Release(); }
         })).ConfigureAwait(false);
     }
+    public async Task RefreshAudioSourcesAsync()
+    {
+        if (!await audioSourcesGate.WaitAsync(0, lifetime.Token).ConfigureAwait(false)) return;
+        try
+        {
+            var devices = await Task.Run(platform.GetOutputDevices, lifetime.Token).ConfigureAwait(false);
+            var processes = await Task.Run(platform.GetCandidateProcesses, lifetime.Token).ConfigureAwait(false);
+            lock (sync) { outputDevices = devices; candidateProcesses = processes; }
+        }
+        finally { audioSourcesGate.Release(); Publish(); }
+    }
+    public async Task SetAudioSourceAsync(DesktopAudioSource source)
+    {
+        source.Validate();
+        await configurationGate.WaitAsync(lifetime.Token).ConfigureAwait(false);
+        try
+        {
+            // Resolve before stopping: an invalid source must not interrupt healthy playback.
+            var selection = await Task.Run(() => source.Resolve(platform), lifetime.Token).ConfigureAwait(false);
+            if (selection is CaptureSelection.Process process)
+            {
+                long? birth = null;
+                try { using var running = System.Diagnostics.Process.GetProcessById(process.ProcessId); birth = running.StartTime.ToUniversalTime().Ticks; }
+                catch (Exception) { /* Platform capture still verifies liveness before starting. */ }
+                source = source with { ProcessName = process.DisplayName, ProcessStartedAtUtcTicks = birth };
+            }
+            lock (sync) { if (settings.AudioSource == source) return; modeChanging = true; }
+            await StopAllAsync().ConfigureAwait(false);
+            lock (sync) { settings = settings with { AudioSource = source }; SaveSettings(); }
+        }
+        finally { lock (sync) modeChanging = false; configurationGate.Release(); Publish(); }
+    }
+    public async Task SetChannelRouteAsync(string id, string route)
+    {
+        if (route is not ("Stereo" or "LeftAsMono" or "RightAsMono"))
+            throw new ArgumentException("请选择立体声、左声道或右声道。");
+        var entry = Get(id);
+        await configurationGate.WaitAsync(lifetime.Token).ConfigureAwait(false);
+        try
+        {
+            lock (sync)
+            {
+                if (!string.IsNullOrEmpty(entry.Preferences.GroupId)) throw new InvalidOperationException("官方立体声组合由音箱管理左右声道。");
+                if (entry.Preferences.ChannelRoute == route) return;
+                modeChanging = true;
+            }
+            await StopAllAsync().ConfigureAwait(false);
+            lock (sync) { entry.Preferences = entry.Preferences with { ChannelRoute = route }; Save(entry); }
+        }
+        finally { lock (sync) modeChanging = false; configurationGate.Release(); Publish(); }
+    }
+    public async Task SetDlnaEnabledAsync(bool enabled)
+    {
+        await configurationGate.WaitAsync(lifetime.Token).ConfigureAwait(false);
+        try
+        {
+            Entry[] stop;
+            lock (sync)
+            {
+                modeChanging = true;
+                stop = enabled ? [] : entries.Values.Where(e => (e.Speaker?.Transport ?? e.Preferences.Transport) == "DLNA").ToArray();
+            }
+            foreach (var entry in stop) await SetSelectedAsync(entry.Id, false).ConfigureAwait(false);
+            lock (sync)
+            {
+                settings = settings with { DlnaEnabled = enabled }; SaveSettings();
+                foreach (var entry in stop) entry.Online = false;
+                if (discovery is SpeakerDiscovery network) network.DlnaEnabled = enabled;
+            }
+        }
+        finally { lock (sync) modeChanging = false; configurationGate.Release(); Publish(); }
+        await RefreshAsync().ConfigureAwait(false);
+    }
+    private void SaveSettings() => store.Save(settings with {
+        // PIDs are session-local identities, never restore one after an app restart.
+        AudioSource = settings.AudioSource is { Mode: "process" } ? new DesktopAudioSource() : settings.AudioSource });
+
     public string Export() => store.Export(null);
 
-    private ICastSession CreateSession()
+    private ICastSession CreateSession(Speaker speaker)
     {
         lock (sync)
         {
+            if (speaker.Transport == "DLNA") return new DlnaCastSession(platform);
             var transport = new NativeCastSession(platform, mediaState);
             return settings.SynchronizedPlayback ? new GroupCastSession(transport, group) : transport;
         }
@@ -334,7 +432,9 @@ public sealed class DesktopController : IAsyncDisposable
 
     private Entry CreateEntry(string id, SpeakerPreferences preferences)
     {
-        var service = new CastService(platform, discovery, sessionFactory, encoderPath);
+        var service = new CastService(platform, discovery, sessionFactory, encoderPath,
+            source: () => { lock (sync) return settings.AudioSource ?? new(); },
+            speakerSessionFactory: sessionFactory is null ? CreateSession : null);
         var entry = new Entry(id, preferences, service);
         service.ReceiverVolumeObserved += (_, volume) =>
         {
@@ -387,7 +487,8 @@ public sealed class DesktopController : IAsyncDisposable
         entry.Preferences = before with {
             Name = string.IsNullOrWhiteSpace(identity.Name) ? before.Name : identity.Name,
             Model = string.IsNullOrWhiteSpace(identity.Model) ? before.Model : identity.Model,
-            GroupId = identity.GroupId, GroupName = identity.GroupName, Channel = identity.Channel };
+            GroupId = identity.GroupId, GroupName = identity.GroupName, Channel = identity.Channel,
+            ChannelRoute = string.IsNullOrEmpty(identity.GroupId) ? before.ChannelRoute : "Stereo" };
         if (entry.Speaker is { } speaker) entry.Speaker = speaker with { Identity = identity, Name = entry.Preferences.Name, Model = entry.Preferences.Model };
         if (entry.Preferences != before) Save(entry);
         if (topologyChanged && discovery is SpeakerDiscovery network)
@@ -420,6 +521,7 @@ public sealed class DesktopController : IAsyncDisposable
         CancellationToken token;
         Speaker speaker;
         int delay, audioBitRate;
+        AudioChannelRoute route;
         lock (sync)
         {
             entry.StartCancellation?.Dispose();
@@ -429,13 +531,14 @@ public sealed class DesktopController : IAsyncDisposable
             speaker = entry.Speaker ?? throw new InvalidOperationException("等待音箱重新上线。");
             delay = entry.Preferences.DelayMilliseconds;
             audioBitRate = settings.AudioBitRate;
+            route = Enum.Parse<AudioChannelRoute>(entry.Preferences.ChannelRoute);
             Save(entry);
         }
         try
         {
             int? volume; lock (sync) volume = entry.Preferences.Volume;
             if (volume is { } value) await entry.Service.SetVolumeAsync(value, token).ConfigureAwait(false);
-            await entry.Service.StartAsync(speaker, token, delay, audioBitRate).ConfigureAwait(false);
+            await entry.Service.StartAsync(speaker, token, delay, audioBitRate, route).ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (token.IsCancellationRequested) { }
         catch (Exception ex) { store.Log("start", ex.Message); }
@@ -448,7 +551,7 @@ public sealed class DesktopController : IAsyncDisposable
             return entries.TryGetValue(id, out var entry) ? entry : throw new KeyNotFoundException("未发现这台音箱。");
         }
     }
-    private void Save(Entry entry) { settings.Speakers![entry.Id] = entry.Preferences; store.Save(settings); }
+    private void Save(Entry entry) { settings.Speakers![entry.Id] = entry.Preferences; SaveSettings(); }
     private void Publish() => Changed?.Invoke(this, Snapshot);
     private async void OnSuspending(object? sender, EventArgs args)
     {
@@ -463,6 +566,7 @@ public sealed class DesktopController : IAsyncDisposable
         await StopAllAsync().ConfigureAwait(false);
         if (discoveryTask is not null) await discoveryTask.ConfigureAwait(false);
         await scanGate.WaitAsync().ConfigureAwait(false); scanGate.Release();
+        await audioSourcesGate.WaitAsync().ConfigureAwait(false); audioSourcesGate.Release();
         Task[] topology; lock (sync) topology = topologyStops.ToArray();
         await Task.WhenAll(topology).ConfigureAwait(false);
         foreach (var entry in entries.Values) { await entry.Service.DisposeAsync().ConfigureAwait(false); entry.StartCancellation?.Dispose(); }

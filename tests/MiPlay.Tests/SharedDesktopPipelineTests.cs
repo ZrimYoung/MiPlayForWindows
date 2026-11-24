@@ -350,6 +350,24 @@ public sealed class SharedDesktopPipelineTests
         }
     }
 
+    [Fact]
+    public async Task PreparedManualRoutesDoNotWaitForThreeStartupReceivers()
+    {
+        using var platform = new Source();
+        var factory = new EncoderFactory();
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        await using var group = await MiPlaySharedAudioSession.StartAsync(platform,
+            new CaptureSelection.SystemMix("default", "default"), Enum.GetValues<AudioChannelRoute>(),
+            "fake", timeout.Token, factory, drainBeforeMediaReady: true, startupParticipantCount: 1);
+        await using var left = group.Subscribe(AudioChannelRoute.LeftAsMono);
+        await Ready(left, timeout.Token);
+        await using var right = group.Subscribe(AudioChannelRoute.RightAsMono);
+        await right.SynchronizeOpenAsync(timeout.Token);
+        await right.PrepareMediaStartupAsync(timeout.Token);
+        Assert.Equal(3, factory.Encoders.Count);
+        Assert.Single(platform.Captures);
+    }
+
     private static Task<MiPlaySharedAudioSession> Start(Source source, IAacEncoderFactory factory, CancellationToken token) =>
         MiPlaySharedAudioSession.StartAsync(source, new CaptureSelection.SystemMix("default", "default"),
             "fake", participantCount: 1, cancellationToken: token, encoderFactory: factory,

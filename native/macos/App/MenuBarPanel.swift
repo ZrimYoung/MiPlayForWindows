@@ -15,7 +15,7 @@ struct MenuBarPanel: View {
     }
     var body: some View {
         VStack(spacing: 12) {
-            SystemMediaCard(media: engine.media)
+            SystemMediaCard(media: engine.media, fallbackSubtitle: engine.snapshot.captureDescription)
             VStack(alignment: .leading, spacing: 8) {
                 HStack {
                     Text("播放到").font(.system(size: 12, weight: .semibold))
@@ -44,21 +44,9 @@ struct MenuBarPanel: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
         }.padding(12).frame(width: 400)
-            .background {
-                if reduceTransparency { Color(nsColor: .windowBackgroundColor) }
-                else { PopoverBackdrop() }
-            }
+            .background(PlaybackBackground(media: engine.media, compact: true))
             .animation(reduceMotion ? nil : .easeInOut(duration: 0.18), value: engine.snapshot.speakers.map(\.selected))
     }
-}
-
-private struct PopoverBackdrop: NSViewRepresentable {
-    func makeNSView(context: Context) -> NSVisualEffectView {
-        let view = NSVisualEffectView()
-        view.material = .popover; view.blendingMode = .behindWindow; view.state = .active
-        return view
-    }
-    func updateNSView(_ view: NSVisualEffectView, context: Context) {}
 }
 
 /// A stereo pair is one route with one shared volume and one shared delay.
@@ -89,6 +77,7 @@ struct CompactSpeakerRow: View {
         if busy { return "正在连接…" }
         if !ready && !selected { return grouped ? "等待左右音箱上线" : "离线" }
         if let warning = cards.first(where: { $0.selected && $0.message.contains("未获确认") }) { return warning.message }
+        if cards.first?.isDlna == true { return "DLNA" }
         return grouped ? (partial ? "立体声 · 部分音箱已选择" : "立体声") : nil
     }
     var body: some View {

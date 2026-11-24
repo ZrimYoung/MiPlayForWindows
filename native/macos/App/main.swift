@@ -10,6 +10,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSPo
     private let statusMenu = NSMenu()
     init(preview: Bool) { engine = EngineClient(preview: preview) }
     func applicationDidFinishLaunching(_ notification: Notification) {
+        AppearancePreferences.shared.apply()
+        if engine.preview && CommandLine.arguments.contains("--artwork-fixture") { installArtworkFixture() }
         let menu = NSMenu(), appMenu = NSMenu(), item = NSMenuItem()
         appMenu.addItem(withTitle: "显示投放面板", action: #selector(showWindow), keyEquivalent: "0").target = self
         appMenu.addItem(withTitle: "设置…", action: #selector(showSettings), keyEquivalent: ",").target = self
@@ -21,10 +23,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSPo
                           styleMask: compactPreview ? [.borderless] : [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView], backing: .buffered, defer: false)
         window.title = "MiPlay"; window.titleVisibility = .hidden; window.titlebarAppearsTransparent = true
         window.backgroundColor = .clear; window.isOpaque = false
-        window.appearance = CommandLine.arguments.contains("--dark") ? NSAppearance(named: .darkAqua) : CommandLine.arguments.contains("--light") ? NSAppearance(named: .aqua) : nil
-        var root = compactPreview ? AnyView(MenuBarPanel(engine: engine)) : AnyView(CastPanel(engine: engine))
-        if CommandLine.arguments.contains("--light") { root = AnyView(root.environment(\.colorScheme, .light)) }
-        else if CommandLine.arguments.contains("--dark") { root = AnyView(root.environment(\.colorScheme, .dark)) }
+        let root = compactPreview ? AnyView(MenuBarPanel(engine: engine)) : AnyView(CastPanel(engine: engine))
         let host = NSHostingView(rootView: root)
         window.contentView = host
         if compactPreview { window.setContentSize(host.fittingSize) }
@@ -48,6 +47,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSPo
         statusMenu.addItem(withTitle: "退出 MiPlay", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         NotificationCenter.default.addObserver(self, selector: #selector(showSettings), name: .miplayShowSettings, object: nil)
         engine.start()
+        if engine.preview && CommandLine.arguments.contains("--appearance-check") { checkAppearance() }
         if engine.preview && CommandLine.arguments.contains("--settings-preview") { showSettings(); window.orderOut(nil) }
         if engine.preview && CommandLine.arguments.contains("--settings-menu-check") {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [self] in
@@ -71,7 +71,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSPo
                                                       duration: 200, elapsed: Double(updates), playing: true, timestamp: Date())
                     if updates == 12 {
                         guard !ended, let menu = tracking,
-                              menu.items.filter({ [256000, 320000, 512000].contains($0.tag) }).count == 3 else { exit(6) }
+                              menu.items.contains(where: { $0.title == "投放设置…" }),
+                              menu.items.contains(where: { $0.title == "重新扫描音箱" }),
+                              !menu.items.contains(where: { $0.title.contains("kbps") || $0.title.contains("读取 Apple Music") || $0.title.contains("显示系统媒体") }) else { exit(6) }
                         menu.cancelTracking()
                     }
                 }
@@ -80,7 +82,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSPo
                 timer.invalidate()
                 NotificationCenter.default.removeObserver(began); NotificationCenter.default.removeObserver(finished)
                 guard updates >= 12 else { exit(7) }
-                print("Settings menu stayed open across 12 media/device updates; all three bitrate actions retained")
+                print("Quick menu stayed open across 12 media/device updates; settings entry retained without duplicate configuration actions")
                 exit(0)
             }
         }
@@ -125,6 +127,36 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSPo
             }
         }
     }
+    private func installArtworkFixture() {
+        guard let context = CGContext(data: nil, width: 64, height: 64, bitsPerComponent: 8, bytesPerRow: 64 * 4,
+            space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return }
+        let colors = [CGColor(red: 0.88, green: 0.38, blue: 0.25, alpha: 1), CGColor(red: 0.19, green: 0.40, blue: 0.68, alpha: 1)] as CFArray
+        if let gradient = CGGradient(colorsSpace: CGColorSpaceCreateDeviceRGB(), colors: colors, locations: [0, 1]) {
+            context.drawLinearGradient(gradient, start: .zero, end: CGPoint(x: 64, y: 64), options: [])
+        }
+        guard let cg = context.makeImage() else { return }
+        let image = NSImage(cgImage: cg, size: NSSize(width: 64, height: 64))
+        let encoded = NSBitmapImageRep(cgImage: cg).representation(using: .png, properties: [:])?.base64EncodedString() ?? ""
+        engine.media.item = NowPlayingItem(title: "封面背景预览", artist: "模拟媒体", album: "外观测试", source: "预览",
+            artwork: image, duration: 240, elapsed: 80, playing: true, artworkBase64: encoded)
+    }
+    private func checkAppearance() {
+        let preferences = AppearancePreferences.shared
+        let defaults = UserDefaults.standard
+        let beforeTheme = defaults.string(forKey: AppearancePreferences.themeKey)
+        let beforeBackground = defaults.string(forKey: AppearancePreferences.backgroundKey)
+        preferences.theme = .light
+        guard NSApp.appearance?.name == .aqua else { exit(20) }
+        preferences.theme = .dark
+        guard NSApp.appearance?.name == .darkAqua else { exit(21) }
+        preferences.theme = .system
+        guard NSApp.appearance == nil else { exit(22) }
+        preferences.background = .nativeGlass; preferences.background = .artwork
+        guard !preferences.persistsChanges, defaults.string(forKey: AppearancePreferences.themeKey) == beforeTheme,
+              defaults.string(forKey: AppearancePreferences.backgroundKey) == beforeBackground else { exit(23) }
+        print("Appearance: light, dark, system inheritance and preview preference isolation passed; no player commands")
+        exit(0)
+    }
     @objc func togglePopover() {
         if NSApp.currentEvent?.type == .rightMouseUp {
             popover.performClose(nil)
@@ -142,10 +174,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSPo
     @objc func showSettings() {
         popover.performClose(nil)
         if settingsWindow == nil {
-            let settings = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 570, height: 720),
+            let settings = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 860, height: 680),
                 styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
             settings.title = "MiPlay 设置"; settings.isReleasedWhenClosed = false
-            settings.minSize = NSSize(width: 540, height: 660)
+            settings.minSize = NSSize(width: 760, height: 560)
             settings.contentView = NSHostingView(rootView: TransmissionSettingsView(engine: engine))
             settings.center(); settingsWindow = settings
         }
@@ -207,6 +239,6 @@ if CommandLine.arguments.contains("--self-check") {
 }
 let app = NSApplication.shared
 app.setActivationPolicy(.regular)
-let delegate = AppDelegate(preview: CommandLine.arguments.contains("--preview") || CommandLine.arguments.contains("--snapshot") || CommandLine.arguments.contains("--popover-check") || CommandLine.arguments.contains("--settings-menu-check"))
+let delegate = AppDelegate(preview: CommandLine.arguments.contains("--preview") || CommandLine.arguments.contains("--snapshot") || CommandLine.arguments.contains("--popover-check") || CommandLine.arguments.contains("--settings-menu-check") || CommandLine.arguments.contains("--appearance-check") || CommandLine.arguments.contains("--artwork-fixture"))
 app.delegate = delegate
 app.run()

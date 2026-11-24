@@ -114,6 +114,36 @@ public sealed class DesktopSessionTests
     }
 
     [Fact]
+    public async Task StartupPhasesReachTheDesktopAndStopCanCancelThem()
+    {
+        using var platform = new FakePlatform();
+        var session = new FakeSession { BlockStartup = true };
+        await using var service = Create(platform, new FakeDiscovery(), () => session);
+        var starting = service.StartAsync(SpeakerAt("same", "192.168.1.3"));
+        await Eventually(() => session.Request is not null);
+        session.Report(new(MiPlayCastState.AwaitingReceiver, "Waiting for RTSP", StartupPhase: "ReverseRtsp"));
+        Assert.Equal(DesktopCastState.Connecting, service.Status.State);
+        Assert.Equal("ReverseRtsp", service.Status.Diagnostics!.StartupPhase);
+        Assert.True(service.Status.Diagnostics.StartupElapsedMilliseconds >= 0);
+        await service.StopAsync();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => starting);
+        Assert.Equal(DesktopCastState.Idle, service.Status.State);
+    }
+
+    [Fact]
+    public async Task DelayedReadinessReportCannotResetAnAlreadyStartedSessionToConnecting()
+    {
+        using var platform = new FakePlatform();
+        var session = new FakeSession { ReadyBeforeFirstMedia = true };
+        await using var service = Create(platform, new FakeDiscovery(), () => session);
+        await service.StartAsync(SpeakerAt("same", "192.168.1.3"));
+        Assert.Equal(DesktopCastState.Casting, service.Status.State);
+        Assert.True(service.Status.Diagnostics!.StartupElapsedMilliseconds >= 0);
+        session.Report(new(MiPlayCastState.AwaitingReceiver, "Late readiness report"));
+        Assert.Equal(DesktopCastState.Casting, service.Status.State);
+    }
+
+    [Fact]
     public void DiscoveryIsCapabilityBasedAndIdentityDoesNotContainTheIpAddress()
     {
         var records = new Dictionary<string, string> { ["apps"] = "[5]", ["idHash"] = Convert.ToBase64String([1, 2, 3]), ["model"] = "unknown-future-model" };
@@ -165,20 +195,23 @@ public sealed class DesktopSessionTests
     {
         public MiPlaySystemAudioRequest? Request;
         public CaptureSelection? Selection;
-        public bool Stopped, Disposed, BlockStartup;
+        public bool Stopped, Disposed, BlockStartup, ReadyBeforeFirstMedia;
         public MiPlayCastDiagnostics Diagnostics { get; private set; } = new(MiPlayCastState.Idle, "");
         public event EventHandler<MiPlayCastDiagnostics>? DiagnosticsChanged;
         public async Task StartAsync(MiPlaySystemAudioRequest request, CancellationToken token)
         {
             Request = request;
             if (BlockStartup) await Task.Delay(Timeout.InfiniteTimeSpan, token);
-            Diagnostics = new(MiPlayCastState.Streaming, ""); DiagnosticsChanged?.Invoke(this, Diagnostics);
+            Diagnostics = new(ReadyBeforeFirstMedia ? MiPlayCastState.AwaitingReceiver : MiPlayCastState.Streaming, "");
+            DiagnosticsChanged?.Invoke(this, Diagnostics);
         }
         public void Fail(MiPlayCastFailureKind kind, string text = "connection lost")
         {
             Diagnostics = new(MiPlayCastState.Error, "", FailureKind: kind, LastError: text);
             DiagnosticsChanged?.Invoke(this, Diagnostics);
         }
+        public void Report(MiPlayCastDiagnostics diagnostic)
+        { Diagnostics = diagnostic; DiagnosticsChanged?.Invoke(this, diagnostic); }
         public Task StopAsync() { Stopped = true; return Task.CompletedTask; }
         public Task SetVolumeAsync(int volume, CancellationToken token) => Task.CompletedTask;
         public Task SetCaptureAsync(CaptureSelection selection, CancellationToken token) { Selection = selection; return Task.CompletedTask; }

@@ -6,6 +6,7 @@ public abstract record CaptureSelection
 
     public sealed record SystemMix(string EndpointId, string DisplayName, bool MuteLocalOutput = false) : CaptureSelection;
 
-    public sealed record Process(int ProcessId, string DisplayName, bool IncludeChildren = true) : CaptureSelection;
+    public sealed record Process(int ProcessId, string DisplayName, bool IncludeChildren = true,
+        bool MuteLocalOutput = false) : CaptureSelection;
 }
 

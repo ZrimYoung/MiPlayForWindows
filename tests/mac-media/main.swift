@@ -335,3 +335,110 @@ check(largeCoverData.count > 256 * 1024 && largeCoverData.count <= 1024 * 1024,
       "Experimental cap actually permits a larger encoded image")
 check(NSBitmapImageRep(data: largeCoverData)?.pixelsWide == 1024, "Larger cap preserves detailed source resolution")
 print("Experimental artwork size limits and default compatibility checks passed")
+
+
+let sourceMonitor = NowPlayingMonitor(); sourceMonitor.setPreview()
+sourceMonitor.acceptSnapshot(withLyrics)
+check(sourceMonitor.item?.lyrics == withLyrics.lyrics, "System source accepts observed player lyrics")
+sourceMonitor.setCaptureBundle("com.tencent.QQMusicMac")
+check(sourceMonitor.item == nil, "Capture source change immediately clears old song and lyrics")
+sourceMonitor.acceptSnapshot(withLyrics)
+check(sourceMonitor.item == nil, "QQ capture rejects Apple Music metadata even when it is globally active")
+var qqScoped = musicTrack; qqScoped.bundleIdentifier = "com.tencent.QQMusicMac"; qqScoped.lyrics = ""
+sourceMonitor.acceptSnapshot(qqScoped)
+check(sourceMonitor.item?.bundleIdentifier == qqScoped.bundleIdentifier && sourceMonitor.item?.lyrics == "", "Matching application metadata is accepted without previous player lyrics")
+sourceMonitor.acceptSnapshot(withLyrics)
+check(sourceMonitor.item == nil, "Unrelated player becoming active clears stale matching metadata")
+sourceMonitor.setCaptureBundle("com.apple.Music"); sourceMonitor.acceptSnapshot(withLyrics)
+check(sourceMonitor.item?.lyrics == withLyrics.lyrics, "Explicit Music capture accepts its matching lyric-bearing item")
+sourceMonitor.setCaptureBundle(nil)
+check(sourceMonitor.item == nil, "Returning to system source clears previous application anchor")
+sourceMonitor.acceptSnapshot(qqScoped)
+check(sourceMonitor.item?.bundleIdentifier == qqScoped.bundleIdentifier && sourceMonitor.item?.lyrics == "", "System source accepts another player without attaching Music lyrics")
+sourceMonitor.setCaptureBundle(""); sourceMonitor.acceptSnapshot(withLyrics); sourceMonitor.acceptSnapshot(qqScoped)
+check(sourceMonitor.item == nil, "Unresolved capture application cannot consume any global metadata")
+print("Capture source media and lyric isolation checks passed")
+
+// A full system frame can omit optional media fields between two complete frames.
+// This sequence previously published a nil image and restarted HD/lyric readers.
+let coverContinuity = NowPlayingMonitor(); coverContinuity.setPreview()
+coverContinuity.acceptObservedSnapshot(first, values: track)
+var absentCover = track; absentCover.removeValue(forKey: "artworkData")
+let missingCover = MediaSnapshot.decode(absentCover)!
+coverContinuity.acceptObservedSnapshot(missingCover, values: absentCover)
+check(coverContinuity.item?.artwork === first.artwork && coverContinuity.item?.artworkBase64 == first.artworkBase64,
+      "Same recording keeps its verified cover across an image-free full snapshot")
+var partialTrack = absentCover
+partialTrack.removeValue(forKey: "artist"); partialTrack.removeValue(forKey: "album"); partialTrack.removeValue(forKey: "duration")
+partialTrack["elapsedTime"] = 20.0
+coverContinuity.acceptObservedSnapshot(MediaSnapshot.decode(partialTrack), values: partialTrack)
+check(coverContinuity.item?.artist == first.artist && coverContinuity.item?.album == first.album && coverContinuity.item?.duration == first.duration,
+      "Incomplete optional metadata does not invent a new recording")
+check(coverContinuity.item?.identity == first.identity && coverContinuity.item?.artwork === first.artwork && coverContinuity.item?.elapsed == 20,
+      "Metadata continuity preserves the cover while accepting the newer position")
+coverContinuity.acceptObservedSnapshot(first, values: track)
+check(coverContinuity.item?.artwork === first.artwork, "Cover does not alternate when the complete frame returns")
+
+var replacedObject = first
+replacedObject.artwork = NSImage(cgImage: bitmap.cgImage!, size: .zero)
+check(replacedObject.artwork !== first.artwork, "Image-allocation regression fixture is independent")
+check(MediaArtworkVisualIdentity(replacedObject) == MediaArtworkVisualIdentity(first),
+      "Equal cover bytes do not trigger a transition when the system allocates another NSImage")
+check(MediaSnapshotContinuity.reusingImage(from: first, to: replacedObject).artwork === first.artwork,
+      "Repeated encoded content reuses the displayed image object")
+var laterProgress = first; laterProgress.elapsed = 40; laterProgress.playing = false; laterProgress.trackIdentifier = "new-queue-uuid"
+check(MediaArtworkVisualIdentity(laterProgress) == MediaArtworkVisualIdentity(first),
+      "Position, pause and regenerated queue IDs do not animate the artwork")
+
+var newRecording = missingCover; newRecording.title = "Song B"
+coverContinuity.acceptSnapshot(newRecording)
+check(coverContinuity.item?.artwork == nil && coverContinuity.item?.artworkBase64 == "",
+      "A new song immediately clears the forwarded old cover; any visual fade is UI-only")
+check(MediaArtworkVisualIdentity(newRecording) != MediaArtworkVisualIdentity(first), "Actual track change has a new transition identity")
+var albumVersion = missingCover; albumVersion.album = "Another album"
+check(MediaSnapshotContinuity.preservingVerifiedFields(albumVersion, previous: first).artwork == nil,
+      "Another album with the same song name cannot borrow the old cover")
+var differentDuration = missingCover; differentDuration.duration = 125
+check(MediaSnapshotContinuity.preservingVerifiedFields(differentDuration, previous: first).artwork == nil,
+      "Different recording duration rejects previous artwork")
+var otherPlayer = missingCover; otherPlayer.bundleIdentifier = "another.player"
+check(MediaSnapshotContinuity.preservingVerifiedFields(otherPlayer, previous: first).artwork == nil,
+      "Another player cannot borrow same-titled artwork")
+
+var hdPrepared = musicTrack; hdPrepared.artworkBase64 = "verified-hd-content"; hdPrepared.artworkSummary = "HD"
+let hdState = DirectArtworkState(expected: musicTrack, raw: "verified-raw-content", prepared: hdPrepared, options: ArtworkOptions())
+let hdPlaying = hdState.applying(to: musicTrack, options: ArtworkOptions())
+let hdRefreshed = MediaSnapshotContinuity.preferringDirectArtwork(hdState, previous: hdPlaying, incoming: musicTrack, options: ArtworkOptions())
+check(hdRefreshed.artworkBase64 == "verified-hd-content", "A new system thumbnail cannot replace the track's verified HD cover")
+let hdWhileEncoding = MediaSnapshotContinuity.preferringDirectArtwork(hdState, previous: hdPlaying, incoming: musicTrack, options: newOptions)
+check(hdWhileEncoding.artworkBase64 == hdPlaying.artworkBase64, "Settings re-encode keeps HD instead of bouncing through a thumbnail")
+check(MediaSnapshotContinuity.preferringDirectArtwork(hdState, previous: hdPlaying, incoming: otherSong, options: ArtworkOptions()).artworkBase64 == otherSong.artworkBase64,
+      "HD preservation cannot cross a song boundary")
+
+let nullFrame = MediaSnapshot.update(from: Data(#"{"type":"data","diff":false,"payload":null}"#.utf8))!
+let emptyFrame = MediaSnapshot.update(from: Data(#"{"type":"data","diff":false,"payload":{}}"#.utf8))!
+check(nullFrame.explicitClear && !emptyFrame.explicitClear, "Explicit player clear differs from a temporarily incomplete dictionary")
+let transientMonitor = NowPlayingMonitor(); transientMonitor.setPreview(); transientMonitor.acceptSnapshot(first)
+transientMonitor.acceptObservedSnapshot(nil, values: [:])
+check(transientMonitor.item?.artwork === first.artwork, "Transient empty frame does not flash a placeholder")
+transientMonitor.acceptObservedSnapshot(first, values: track)
+RunLoop.main.run(until: Date().addingTimeInterval(0.4))
+check(transientMonitor.item?.artwork === first.artwork, "A cancelled empty-frame timer cannot clear a recovered recording")
+transientMonitor.acceptObservedSnapshot(nil, values: [:])
+RunLoop.main.run(until: Date().addingTimeInterval(0.2))
+transientMonitor.acceptObservedSnapshot(nil, values: [:])
+RunLoop.main.run(until: Date().addingTimeInterval(0.2))
+check(transientMonitor.item == nil, "Repeated empty frames cannot indefinitely extend the 350-ms hold")
+transientMonitor.acceptSnapshot(first)
+transientMonitor.acceptObservedSnapshot(nil, values: nullFrame.values, explicitClear: nullFrame.explicitClear)
+check(transientMonitor.item == nil, "Explicit null clears immediately without waiting for visual continuity")
+transientMonitor.acceptSnapshot(first)
+transientMonitor.acceptObservedSnapshot(nil, values: ["bundleIdentifier": "another.player"])
+check(transientMonitor.item == nil, "An identified source switch cannot hold an old track during a title-free frame")
+let exitDuringHold = NowPlayingMonitor(); exitDuringHold.setPreview(); exitDuringHold.acceptSnapshot(first)
+exitDuringHold.acceptObservedSnapshot(nil, values: [:]); exitDuringHold.playerTerminated(first.bundleIdentifier)
+check(exitDuringHold.item == nil, "Player termination overrides transient artwork hold immediately")
+let scopeDuringHold = NowPlayingMonitor(); scopeDuringHold.setPreview(); scopeDuringHold.acceptSnapshot(first)
+scopeDuringHold.acceptObservedSnapshot(nil, values: [:]); scopeDuringHold.setCaptureBundle("another.player")
+check(scopeDuringHold.item == nil, "Capture-source changes immediately clear every retained media field")
+print("Cover continuity, HD precedence, visual identity and bounded empty-frame checks passed")

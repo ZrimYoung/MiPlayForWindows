@@ -13,7 +13,7 @@ public interface IDesktopAudioPlatform : IAudioSourceCatalog, IDisposable
 }
 
 public sealed record Speaker(string Id, string Name, string Model, RendererDevice Renderer,
-    SpeakerIdentity? Identity = null)
+    SpeakerIdentity? Identity = null, string Transport = "MiPlay")
 {
     public override string ToString() => string.IsNullOrEmpty(Model) ? Name : $"{Name} · {Model}";
 }

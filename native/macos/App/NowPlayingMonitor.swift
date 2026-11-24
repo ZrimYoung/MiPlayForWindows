@@ -29,6 +29,62 @@ struct NowPlayingItem {
     }
 }
 
+/// Missing optional fields in a full system update are not proof of a new recording.
+/// Only preserve assets while every supplied identifying field still agrees.
+enum MediaSnapshotContinuity {
+    static func sameRecording(_ previous: NowPlayingItem, _ incoming: NowPlayingItem) -> Bool {
+        guard !previous.title.isEmpty, previous.title == incoming.title,
+              !previous.bundleIdentifier.isEmpty, previous.bundleIdentifier == incoming.bundleIdentifier else { return false }
+        for (old, new) in [(previous.artist, incoming.artist), (previous.album, incoming.album)] {
+            if !old.isEmpty && !new.isEmpty && old != new { return false }
+        }
+        if let old = previous.duration, let new = incoming.duration, old != new { return false }
+        return true
+    }
+    static func preservingVerifiedFields(_ incoming: NowPlayingItem, previous: NowPlayingItem?) -> NowPlayingItem {
+        guard let previous, sameRecording(previous, incoming) else { return incoming }
+        var next = incoming
+        if next.artist.isEmpty { next.artist = previous.artist }
+        if next.album.isEmpty { next.album = previous.album }
+        if next.duration == nil { next.duration = previous.duration }
+        if next.artwork == nil { next = copyingArtwork(from: previous, to: next) }
+        return reusingImage(from: previous, to: next)
+    }
+    static func preferringDirectArtwork(_ direct: DirectArtworkState?, previous: NowPlayingItem?,
+                                        incoming: NowPlayingItem, options: ArtworkOptions) -> NowPlayingItem {
+        guard let direct, direct.matches(incoming) else { return incoming }
+        if direct.prepared != nil && direct.options != options,
+           let previous, sameRecording(previous, incoming) {
+            // Keep the already verified HD cover while its replacement is encoded.
+            return copyingArtwork(from: previous, to: incoming)
+        }
+        return direct.applying(to: incoming, options: options)
+    }
+    static func copyingArtwork(from original: NowPlayingItem, to item: NowPlayingItem) -> NowPlayingItem {
+        var result = item
+        result.artwork = original.artwork; result.artworkBase64 = original.artworkBase64
+        result.artworkSummary = original.artworkSummary
+        return result
+    }
+    static func reusingImage(from previous: NowPlayingItem?, to incoming: NowPlayingItem) -> NowPlayingItem {
+        guard let previous, sameRecording(previous, incoming), !incoming.artworkBase64.isEmpty,
+              incoming.artworkBase64 == previous.artworkBase64, previous.artwork != nil else { return incoming }
+        var result = incoming; result.artwork = previous.artwork; return result
+    }
+}
+
+/// Content identity, independent of a freshly allocated NSImage or progress tick.
+struct MediaArtworkVisualIdentity: Hashable {
+    let track: String
+    let encoded: String
+    let uncodedImage: ObjectIdentifier?
+    init(_ item: NowPlayingItem?) {
+        track = item?.identity ?? ""
+        encoded = item?.artworkBase64 ?? ""
+        uncodedImage = encoded.isEmpty ? item?.artwork.map(ObjectIdentifier.init) : nil
+    }
+}
+
 /// Playback-state notifications can precede a refreshed position anchor. Keep the
 /// displayed position at a pause/resume boundary until the player supplies one.
 struct MediaProgressTracker {
@@ -79,7 +135,7 @@ final class NowPlayingMonitor: ObservableObject {
     @Published private(set) var highResolutionArtworkStatus = "等待 Apple Music 播放"
     @Published var highResolutionArtworkEnabled = UserDefaults.standard.bool(forKey: "fetchAppleMusicArtwork") {
         didSet {
-            UserDefaults.standard.set(highResolutionArtworkEnabled, forKey: "fetchAppleMusicArtwork")
+            DesktopPreferences.set(highResolutionArtworkEnabled, forKey: "fetchAppleMusicArtwork")
             clearDirectArtwork(retryPermission: true)
             refreshArtwork()
             refreshHighResolutionArtwork()
@@ -87,7 +143,7 @@ final class NowPlayingMonitor: ObservableObject {
     }
     @Published var lyricsEnabled = UserDefaults.standard.bool(forKey: "readAppleMusicLyrics") {
         didSet {
-            UserDefaults.standard.set(lyricsEnabled, forKey: "readAppleMusicLyrics")
+            DesktopPreferences.set(lyricsEnabled, forKey: "readAppleMusicLyrics")
             lyricsReader.reset(retryPermission: true)
             item?.lyrics = ""
             refreshLyrics()
@@ -95,10 +151,18 @@ final class NowPlayingMonitor: ObservableObject {
     }
     @Published var enabled: Bool = UserDefaults.standard.object(forKey: "showSystemMedia") as? Bool ?? true {
         didSet {
-            UserDefaults.standard.set(enabled, forKey: "showSystemMedia")
+            DesktopPreferences.set(enabled, forKey: "showSystemMedia")
             invalidateRequest()
             if enabled && active { startStream() } else { availability = "disabled" }
         }
+    }
+    private var captureBundle: String?
+    /// nil follows system media; an empty bundle intentionally accepts no player.
+    func setCaptureBundle(_ bundle: String?) {
+        guard captureBundle != bundle else { return }
+        captureBundle = bundle
+        invalidateRequest()
+        if active && enabled && !preview { startStream() }
     }
     private var generation = 0
     private var preview = false
@@ -121,6 +185,8 @@ final class NowPlayingMonitor: ObservableObject {
     private var lyricsTimer: Timer?
     private var artworkObserver: NSObjectProtocol?
     private var latestSnapshot: [String: Any]?
+    private var transientClear: DispatchWorkItem?
+    private var transientClearRevision = 0
     private let artworkWorker = DispatchQueue(label: "MiPlay.artwork-refresh", qos: .utility)
     private let reader = DispatchQueue(label: "MiPlay.system-media", qos: .utility)
 
@@ -208,17 +274,22 @@ final class NowPlayingMonitor: ObservableObject {
             }
         }
     }
-    private func invalidateRequest() {
+    private func invalidateRequest(preserveMedia: Bool = false) {
         generation += 1
-        latestSnapshot = nil
-        clearDirectArtwork()
-        lyricsReader.reset()
+        transientClearRevision += 1
+        transientClear?.cancel(); transientClear = nil
+        if !preserveMedia {
+            latestSnapshot = nil
+            clearDirectArtwork()
+            lyricsReader.reset()
+            item = nil
+            progress = MediaProgressTracker()
+        }
         cancelAction(); commandError = ""
         retryTimer?.invalidate(); retryTimer = nil
         fallbackTimer?.invalidate(); fallbackTimer = nil
         if let child { Self.terminate(child) }
-        child = nil; pendingFallback = false; receivedStream = false; item = nil
-        progress = MediaProgressTracker()
+        child = nil; pendingFallback = false; receivedStream = false
     }
     private func startStream() {
         let executableDirectory = Bundle.main.executableURL!.deletingLastPathComponent()
@@ -244,14 +315,14 @@ final class NowPlayingMonitor: ObservableObject {
                     let bytes = try MediaPipeReader.read(output.fileHandleForReading)
                     if bytes.isEmpty { break }
                     for line in try lines.append(bytes) {
-                        guard let values = MediaSnapshot.fullSnapshot(from: line) else { continue }
+                        guard let update = MediaSnapshot.update(from: line) else { continue }
+                        let values = update.values
                         let options = ArtworkOptions.load()
                         let metadata: NowPlayingItem? = autoreleasepool { MediaSnapshot.decode(values, artworkOptions: options) }
                         DispatchQueue.main.async {
                             guard let self, self.generation == request, self.active, self.enabled else { return }
                             self.receivedStream = true
-                            self.latestSnapshot = values
-                            self.acceptSnapshot(metadata)
+                            self.acceptObservedSnapshot(metadata, values: values, explicitClear: update.explicitClear)
                             if options != ArtworkOptions.load() { self.refreshArtwork() }
                             self.availability = self.item == nil ? "empty_or_restricted" : "available_via_media_bridge"
                         }
@@ -262,13 +333,15 @@ final class NowPlayingMonitor: ObservableObject {
             try? output.fileHandleForReading.close()
             DispatchQueue.main.async {
                 guard let self, self.generation == request, self.active, self.enabled else { return }
-                self.child = nil; self.item = nil
+                self.child = nil
+                // A bridge restart is not a player exit. The bounded fallback query
+                // confirms or clears the source without a needless empty-cover frame.
                 self.startFallback()
             }
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + 5) { [weak self] in
             guard let self, self.generation == request, !self.receivedStream else { return }
-            self.invalidateRequest()
+            self.invalidateRequest(preserveMedia: true)
             if self.active && self.enabled { self.startFallback() }
         }
     }
@@ -280,7 +353,7 @@ final class NowPlayingMonitor: ObservableObject {
         RunLoop.main.add(timer, forMode: .common); fallbackTimer = timer
         let retry = Timer(timeInterval: 15, repeats: false) { [weak self] _ in
             guard let self, self.active, self.enabled else { return }
-            self.invalidateRequest(); self.startStream()
+            self.invalidateRequest(preserveMedia: true); self.startStream()
         }
         RunLoop.main.add(retry, forMode: .common); retryTimer = retry
     }
@@ -315,23 +388,63 @@ final class NowPlayingMonitor: ObservableObject {
             let metadata = MediaSnapshot.decode(converted)
             DispatchQueue.main.async {
                 guard let self, self.generation == request, self.active, self.enabled else { return }
-                self.child = nil; self.pendingFallback = false; self.acceptSnapshot(metadata)
+                self.child = nil; self.pendingFallback = false
+                self.acceptObservedSnapshot(metadata, values: converted)
                 self.availability = self.item == nil ? "empty_or_restricted" : "text_only_fallback"
             }
         }
     }
     func setPreview() { stop(); preview = true; availability = "preview" }
-    func acceptSnapshot(_ metadata: NowPlayingItem?) {
+    /// A null payload is an explicit clear. An incomplete observation has at most
+    /// 350 ms to recover; it never becomes a new track carrying an old track's image.
+    func acceptObservedSnapshot(_ incoming: NowPlayingItem?, values: [String: Any], explicitClear: Bool = false) {
+        let bundle = MediaSnapshot.bundleIdentifier(values)
+        if explicitClear || (captureBundle != nil && bundle != captureBundle) ||
+            (!bundle.isEmpty && item != nil && bundle != item?.bundleIdentifier && incoming == nil) {
+            latestSnapshot = nil; acceptSnapshot(nil); return
+        }
+        guard let incoming else {
+            guard item != nil, transientClear == nil else { return }
+            let request = generation, clearRevision = transientClearRevision
+            let clear = DispatchWorkItem { [weak self] in
+                guard let self, self.generation == request, self.transientClearRevision == clearRevision else { return }
+                self.latestSnapshot = nil; self.acceptSnapshot(nil)
+            }
+            transientClear = clear
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.35, execute: clear)
+            return
+        }
+        guard !terminatedSources.contains(incoming.bundleIdentifier) else { return }
+        let coherent = MediaSnapshotContinuity.preservingVerifiedFields(incoming, previous: item)
+        var snapshot = values
+        snapshot["title"] = coherent.title; snapshot["artist"] = coherent.artist; snapshot["album"] = coherent.album
+        snapshot["duration"] = coherent.duration
+        if let previous = item, MediaSnapshotContinuity.sameRecording(previous, coherent), incoming.artwork == nil {
+            snapshot["artworkData"] = latestSnapshot?["artworkData"]
+        }
+        latestSnapshot = snapshot
+        acceptSnapshot(coherent)
+    }
+    func acceptSnapshot(_ incoming: NowPlayingItem?) {
+        transientClearRevision += 1
+        transientClear?.cancel(); transientClear = nil
+        // A globally active player may differ from the application being captured.
+        // Clear it instead of attaching another player's metadata or cached lyrics.
+        let metadata: NowPlayingItem?
+        if let captureBundle, incoming?.bundleIdentifier != captureBundle { metadata = nil }
+        else { metadata = incoming.map { MediaSnapshotContinuity.preservingVerifiedFields($0, previous: item) } }
         if let metadata, terminatedSources.contains(metadata.bundleIdentifier) { return }
         if item?.bundleIdentifier != metadata?.bundleIdentifier { cancelAction(); commandError = "" }
         if item?.identity != metadata?.identity || item?.duration != metadata?.duration { clearDirectArtwork() }
         var next = progress.accept(metadata)
         if highResolutionArtworkEnabled, let incoming = next {
-            next = directArtwork?.applying(to: incoming, options: ArtworkOptions.load()) ?? incoming
+            next = MediaSnapshotContinuity.preferringDirectArtwork(directArtwork, previous: item,
+                incoming: incoming, options: ArtworkOptions.load())
         }
         if let previous = item, previous.identity == next?.identity, previous.duration == next?.duration {
             next?.lyrics = previous.lyrics
         }
+        if let value = next { next = MediaSnapshotContinuity.reusingImage(from: item, to: value) }
         item = next
         refreshLyrics()
         refreshHighResolutionArtwork()
@@ -392,7 +505,7 @@ final class NowPlayingMonitor: ObservableObject {
                     current.artworkBase64 = updated?.artworkBase64 ?? ""
                     current.artworkSummary = updated?.artworkSummary ?? "当前没有封面"
                 }
-                self.item = current
+                self.item = MediaSnapshotContinuity.reusingImage(from: self.item, to: current)
             }
         }
     }
